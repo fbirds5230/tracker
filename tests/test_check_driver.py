@@ -263,6 +263,60 @@ def test_check_doesnt_count_pythons_outside_the_lock(repo):
     assert r["per_target"]["3.14 linux-x86_64"] == {"wheel": 0, "source": 0, "missing": 0, "unknown": 0}
 
 
+@pytest.mark.parametrize("lockfile", ["uv.lock", "uv-linux.lock"])
+def test_check_doesnt_count_targets_outside_uv_environments(repo, lockfile):
+    opts = options(platforms=["linux-x86_64", "linux-aarch64", "win-amd64"])
+    before = json.loads(driver.check(str(repo), "uv.lock", opts))
+    (repo / lockfile).write_text('supported-markers = ["sys_platform == \'linux\'"]\n' + LOCK, encoding="utf-8")
+    r = json.loads(driver.check(str(repo), lockfile, opts))
+    assert r["outside_environments"] == ["3.13 win-amd64"]
+    assert r["outside_lock"] == []
+    assert r["per_target"]["3.13 win-amd64"] == {"wheel": 0, "source": 0, "missing": 0, "unknown": 0}
+    for label in ("3.13 linux-x86_64", "3.13 linux-aarch64"):
+        assert r["per_target"][label] == before["per_target"][label]
+    assert [row["name"] for row in r["rows"]] == ["fastlib"]
+    assert r["rows"][0]["gaps"] == ["3.13 linux-aarch64"]
+    assert r["rows"][0]["keep"] == ["3.13 linux-x86_64"]
+    assert all("3.13 win-amd64" not in row[key] for row in r["rows"] for key in ("gaps", "unknown", "keep"))
+    assert [t.label(True) for t in driver._last_check[1]] == ["3.13 linux-x86_64", "3.13 linux-aarch64"]
+
+
+def test_uv_lock_without_supported_markers_still_counts_every_platform(repo):
+    r = json.loads(driver.check(str(repo), "uv.lock", options(platforms=["linux-x86_64", "win-amd64"])))
+    assert r["outside_environments"] == []
+    assert r["per_target"]["3.13 linux-x86_64"] == {"wheel": 2, "source": 0, "missing": 0, "unknown": 0}
+    assert r["per_target"]["3.13 win-amd64"] == {"wheel": 2, "source": 1, "missing": 0, "unknown": 0}
+    assert r["rows"][0]["gaps"] == ["3.13 win-amd64"]
+
+
+def test_uv_environments_can_leave_out_every_target(repo):
+    (repo / "uv.lock").write_text('supported-markers = ["sys_platform == \'linux\'"]\n' + LOCK, encoding="utf-8")
+    r = json.loads(driver.check(str(repo), "uv.lock", options(platforms=["win-amd64"])))
+    assert r["outside_environments"] == ["3.13 win-amd64"]
+    assert r["per_target"]["3.13 win-amd64"] == {"wheel": 0, "source": 0, "missing": 0, "unknown": 0}
+    assert r["rows"] == []
+    assert driver._last_check[1] == []
+
+
+@pytest.mark.parametrize("marker", ["sys_platform == 'win32'", "platform_release == 'unknown'", "not a valid marker"])
+def test_uv_environments_keep_a_target_when_any_marker_can_hold(repo, marker):
+    markers = json.dumps(["sys_platform == 'linux'", marker])
+    (repo / "uv.lock").write_text(f"supported-markers = {markers}\n" + LOCK, encoding="utf-8")
+    r = json.loads(driver.check(str(repo), "uv.lock", options(platforms=["linux-x86_64", "win-amd64"])))
+    assert r["outside_environments"] == []
+    assert r["rows"][0]["gaps"] == ["3.13 win-amd64"]
+
+
+def test_uv_environments_are_checked_per_python_and_platform(repo):
+    marker = "sys_platform == 'linux' and python_version < '3.14'"
+    (repo / "uv.lock").write_text(f"supported-markers = {json.dumps([marker])}\n" + LOCK, encoding="utf-8")
+    r = json.loads(driver.check(str(repo), "uv.lock", options(pythons=["3.13", "3.14"], platforms=["linux-x86_64", "win-amd64"])))
+    assert r["outside_lock"] == []
+    assert r["outside_environments"] == ["3.13 win-amd64", "3.14 linux-x86_64", "3.14 win-amd64"]
+    assert r["per_target"]["3.13 linux-x86_64"]["wheel"] == 2
+    assert all(not any(r["per_target"][label].values()) for label in r["outside_environments"])
+
+
 PYLOCK = """\
 lock-version = "1.0"
 created-by = "pip"

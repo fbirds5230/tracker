@@ -293,13 +293,29 @@ export function unreadableReason(result) {
 
 // A platform's tile, from its counts ({wheel, source, missing, unknown}): how many packages have no wheel there, a ✓
 // only when every package was checked and has one, and a ? when none is known to lack one but some couldn't be
-// checked, where a ✓ would read as a pass. `outside`: the lock leaves this Python out, so nothing is counted.
+// checked, where a ✓ would read as a pass. `outside`: the lock leaves this target out, so nothing is counted.
 export function tileText(c, outside, notChecked = 0) {
   if (outside) return { mark: "–", note: "not locked" };
   const without = c.source + c.missing; // unknown is in the tooltip, never counted as "without a wheel"
   if (without) return { mark: String(without), note: "without a wheel" };
   if (notChecked) return { mark: "?", note: `${notChecked + c.unknown} not checked` };
   return c.unknown ? { mark: "?", note: `${c.unknown} unknown` } : { mark: "✓", note: "all wheels" };
+}
+
+export function targetOutsideLock(result, target) {
+  return result.outside_lock.includes(target.python) || (result.outside_environments || []).includes(target.label);
+}
+
+// uv's environments can restrict Python as well as the platform. With several Pythons picked, name both so a
+// target left out for one Python doesn't read as though every selected Python on that platform is excluded.
+export function environmentsText(result) {
+  const excluded = result.targets.filter((t) => (result.outside_environments || []).includes(t.label));
+  if (!excluded.length) return null;
+  const names = Object.fromEntries(PLATFORMS);
+  const severalPythons = new Set(result.targets.map((t) => t.python)).size > 1;
+  const targets = excluded.map((t) => `${names[t.platform] || t.platform}${severalPythons ? ` on Python ${t.python}` : ""}`);
+  const pronoun = targets.length === 1 ? "it" : "them";
+  return `${result.lockfile} is locked for [tool.uv] environments that leave out ${targets.join(", ")}, so uv sync fails there. Add ${pronoun} to environments and run uv lock to check ${pronoun}.`;
 }
 
 // Why packages of a looked-up file are unknown, from the worker's count of the lookups that got no answer
@@ -449,7 +465,7 @@ export function rowsFor(result, python) {
 export function headline(result) {
   const gaps = new Set(result.rows.filter((r) => r.gaps.length).map((r) => r.name));
   const unknown = new Set(result.rows.filter((r) => (r.unknown || []).length && !gaps.has(r.name)).map((r) => r.name));
-  const counted = result.targets.filter((t) => !result.outside_lock.includes(t.python));
+  const counted = result.targets.filter((t) => !targetOutsideLock(result, t));
   return { gaps: gaps.size, unknown: unknown.size, packages: result.packages, targets: counted.length };
 }
 
@@ -662,7 +678,7 @@ export function shareText(repoName, h, pythons, platforms, url, notChecked = 0) 
     return `${repoName}: no dependencies were checked (checked with wheelgap) ${url}`;
   }
   if (h.targets === 0) {
-    return `${repoName}: lockfile leaves out every Python picked${tail}`;
+    return `${repoName}: lockfile leaves out every target picked${tail}`;
   }
   if (h.gaps === 0 && h.unknown) {
     const where = h.targets === 1 ? "1 target" : "some targets";
@@ -672,7 +688,11 @@ export function shareText(repoName, h, pythons, platforms, url, notChecked = 0) 
     const deps = h.packages === 1 ? "1 dependency has" : `all ${h.packages} dependencies have`;
     const pyList = sortPythons(pythons).join(", ");
     const plats = platforms.length === 1 ? "1 platform" : `${platforms.length} platforms`;
-    return `${notChecked ? "" : "✓ "}${repoName}: ${notChecked ? deps.replace(/ (has|have)$/, " checked $1") : deps} a wheel on Python ${pyList} for ${plats}${tail}`;
+    // Environment markers can leave only some Python/platform pairs. Naming each axis would imply their full
+    // cross product was checked (for example Linux on 3.13 and Windows on 3.14 doesn't check Windows on 3.13).
+    const where = h.targets < pythons.length * platforms.length
+      ? `for the ${h.targets} checked targets` : `on Python ${pyList} for ${plats}`;
+    return `${notChecked ? "" : "✓ "}${repoName}: ${notChecked ? deps.replace(/ (has|have)$/, " checked $1") : deps} a wheel ${where}${tail}`;
   }
   const verb = h.gaps === 1 ? "has" : "have";
   const where = h.targets === 1 ? "1 target" : `at least one of ${h.targets} targets`;

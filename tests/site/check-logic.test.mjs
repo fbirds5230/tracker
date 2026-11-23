@@ -477,6 +477,25 @@ test("rowsFor lists one Python's gaps, most first; headline counts distinct pack
   assert.deepEqual(headline(result), { gaps: 2, unknown: 0, packages: 10, targets: 2 });
 });
 
+test("headline leaves targets outside uv environments out of the counted total", () => {
+  const excluded = { ...result, outside_environments: ["3.14 win-arm64"], rows: [] };
+  assert.deepEqual(headline(excluded), { gaps: 0, unknown: 0, packages: 10, targets: 1 });
+  const none = { ...excluded, outside_environments: ["3.14 win-arm64", "3.14 linux-x86_64"] };
+  assert.equal(headline(none).targets, 0);
+  assert.match(shareText("o/r", headline(none), [], [], "https://example.com"), /lockfile leaves out every target picked/);
+});
+
+test("the shared clean result doesn't imply excluded Python/platform pairs were checked", () => {
+  const diagonal = {
+    ...result, outside_lock: [], rows: [],
+    targets: ["3.13", "3.14"].flatMap((python) => ["linux-x86_64", "win-amd64"]
+      .map((platform) => ({ label: `${python} ${platform}`, python, platform }))),
+    outside_environments: ["3.13 win-amd64", "3.14 linux-x86_64"],
+  };
+  const text = shareText("o/r", headline(diagonal), ["3.13", "3.14"], ["linux-x86_64", "win-amd64"], "https://example.com");
+  assert.equal(text, "✓ o/r: all 10 dependencies have a wheel for the 2 checked targets (checked with wheelgap) https://example.com");
+});
+
 test("the CLI command and the fix prompt reproduce the check", () => {
   assert.equal(cliCommand(result, ["3.14t", "3.14"], ["linux-x86_64", "win-arm64"]), "uvx wheelgap uv.lock -p 3.14,3.14t -t linux-x86_64,win-arm64");
   assert.equal(cliCommand({ lockfile: "my app/uv.lock" }, ["3.14"], ["linux-x86_64"]), "uvx wheelgap 'my app/uv.lock' -p 3.14 -t linux-x86_64");

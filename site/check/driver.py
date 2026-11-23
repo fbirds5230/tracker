@@ -25,7 +25,7 @@ import wheelgap
 from packaging.utils import canonicalize_name
 from wheelgap import api, offline, origin, pypi, sources, suggest_targets
 from wheelgap import suggest as release_suggest
-from wheelgap.check import Row, Status
+from wheelgap.check import Row, Status, marker_holds
 from wheelgap.sources import LOCKFILES, Package, Source, SourceError, file_kind, load_file, pythons_outside_lock
 from wheelgap.targets import DEFAULT_PLATFORMS, NEWEST_PYTHON, Target, TargetError
 
@@ -524,6 +524,8 @@ def check(
     options: {"pythons": [...], "platforms": [...], "glibc"?, "musl"?, "macos"?}. A target Python the lock's
     requires-python leaves out is reported in `outside_lock` and none of its cells count as gaps: uv keeps no wheels
     for it in the lock, so they'd be false gaps (the CLI rechecks them on PyPI; the page says so instead).
+    A uv.lock's supported-markers can also leave out a target: its label is in `outside_environments`, and none of
+    its cells count either. uv sync refuses those targets rather than installing from this lock there.
 
     A file that doesn't list every package's files (LOOKUPS: Pipfile.lock, requirements files, pixi.lock,
     pyproject.toml) is checked from PyPI JSON the worker fetched for the lookups needs() named, keyed
@@ -566,6 +568,7 @@ def check(
         else []
     )
     extra_pkg_hosts = {pkg: host for host in extra_hosts for pkg in PUBLIC_EXTRA_INDEXES[host]}
+    outside_environments: set[str] = set()
     if looked_up:
         _fill_lookups(
             source,
@@ -589,6 +592,12 @@ def check(
         except SourceError as e:
             return json.dumps({"error": str(e), "kind": "needs-index"})
         try:
+            if source.kind == "uv":
+                # Once the pin is 0.14.0 or later, use check.lock_environment_targets(); 0.13.0 doesn't keep these.
+                markers = tomllib.loads(path.read_text(encoding="utf-8")).get("supported-markers", [])
+                outside_environments = {
+                    t.label(True) for t in targets if markers and not any(marker_holds(m, t) for m in markers)
+                }
             results, source, check_rows = api._check_lockfile(path, targets, online=False, offline=True)
         except (SourceError, ValueError, OSError) as e:  # ValueError: a lockfile that isn't valid TOML or JSON
             return json.dumps({"error": str(e).replace(f"{root}/", ""), "kind": "source"})
@@ -604,7 +613,7 @@ def check(
             on_pypi[key] = on_pypi.get(key, True) and origin.known_pypi(p, source, private=private)
     _targets.clear()
     _targets.update((t.label(True), t) for t in targets)
-    counted = [t for t in targets if t.python not in outside]
+    counted = [t for t in targets if t.python not in outside and t.label(True) not in outside_environments]
     _last_check = (check_rows, counted, source)
     per_target = {t.label(True): {s.value: 0 for s in (Status.WHEEL, *GAPS, Status.UNKNOWN)} for t in targets}
     rows = []
@@ -638,6 +647,7 @@ def check(
             "targets": [{"label": t.label(True), "python": t.python, "platform": t.platform} for t in targets],
             "requires_python": source.requires_python,
             "outside_lock": sorted(outside),
+            "outside_environments": sorted(outside_environments),
             "packages": len(results),
             "listed": len(source.packages),
             "skipped": sorted({p.name for p in source.packages if p.skip}),
