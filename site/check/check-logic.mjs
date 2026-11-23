@@ -551,7 +551,8 @@ export function verdictText(h, notChecked = 0) {
   const checked = notChecked ? "checked " : "";
   const where = h.targets === 1 ? "this target" : `all ${h.targets} targets`;
   if (h.gaps === 0 && h.unknown) {
-    return `No package is missing a wheel, but ${h.unknown} of ${h.packages} couldn't be checked on ${h.targets === 1 ? "this target" : "some targets"}${tail}`;
+    const count = notChecked ? `${h.packages} checked package${h.packages === 1 ? "" : "s"}` : h.packages;
+    return `No package is missing a wheel, but ${h.unknown} of ${count} couldn't be checked on ${h.targets === 1 ? "this target" : "some targets"}${tail}`;
   }
   if (h.gaps === 0) {
     const count = h.packages === 1 ? `1 ${checked}package has` : `All ${h.packages} ${checked}packages have`;

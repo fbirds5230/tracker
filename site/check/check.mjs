@@ -367,10 +367,14 @@ function render() {
   renderNext();
 }
 
+function notCheckedCount(r) {
+  return (r.private || []).length;
+}
+
 function renderVerdict() {
   const r = state.result;
   const h = headline(r);
-  const notChecked = r.private_count ?? (r.private || []).length;
+  const notChecked = notCheckedCount(r);
   const privateReason = privatePyprojectReason(r);
   const card = $("verdict").closest("section");
   const repoName = `${state.repo.owner}/${state.repo.name}`;
@@ -485,7 +489,7 @@ function renderSetup() {
 
 function renderTargets() {
   const r = state.result;
-  const notChecked = r.private_count ?? (r.private || []).length;
+  const notChecked = notCheckedCount(r);
   const pys = sortPythons(r.targets.map((t) => t.python));
   $("python-tabs").replaceChildren(...pys.map((v) => el("button", {
     type: "button", "aria-pressed": String(v === state.python), text: v, "data-key": `py:${v}`,
@@ -594,7 +598,7 @@ function renderNext() {
   const r = state.result;
   const h = headline(r);
   const isClean = h.gaps === 0 && h.unknown === 0 && h.targets > 0 && h.packages > 0;
-  $("next-title").textContent = isClean && !(r.private || []).length ? "Keep it green" : "Fix it";
+  $("next-title").textContent = isClean && !notCheckedCount(r) ? "Keep it green" : "Fix it";
   $("copy-prompt").hidden = isClean;
   $("prompt-note").hidden = isClean;
   $("cli").textContent = cliCommand(r, state.pythons, state.platforms);
@@ -628,7 +632,7 @@ $("copy-link").onclick = (e) => copy(e.currentTarget, location.href, "Link copie
 // The line names only what the shown result counted: its own targets, less the Pythons the lockfile leaves out,
 // never the current selection (a new check may still be running for it), and how many it left off pypi.org.
 const counted = (key) => [...new Set(state.result.targets.filter((t) => !state.result.outside_lock.includes(t.python)).map((t) => t[key]))];
-$("copy-share").onclick = (e) => copy(e.currentTarget, shareText(`${state.repo.owner}/${state.repo.name}`, headline(state.result), counted("python"), counted("platform"), location.href, (state.result.private || []).length), "Result copied");
+$("copy-share").onclick = (e) => copy(e.currentTarget, shareText(`${state.repo.owner}/${state.repo.name}`, headline(state.result), counted("python"), counted("platform"), location.href, notCheckedCount(state.result)), "Result copied");
 $("copy-prompt").onclick = (e) => copy(e.currentTarget, fixPrompt(`${state.repo.owner}/${state.repo.name}`, state.result, state.fixes, state.pythons, state.platforms, state.gapWheels, state.lab), "Prompt copied");
 $("copy-badge").onclick = (e) => copy(e.currentTarget, $("badge-md").textContent, "Badge Markdown copied");
 $("copy-verdict-badge").onclick = (e) => copy(e.currentTarget, $("badge-md").textContent, "Badge Markdown copied");
