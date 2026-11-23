@@ -454,6 +454,29 @@ test("the verdict reads right for one target and many", () => {
   assert.equal(verdictText({ gaps: 0, unknown: 0, packages: 0, targets: 4 }), "No packages were checked");
 });
 
+test("the verdict counts checked and unchecked packages without claiming a complete pass", () => {
+  const cases = [
+    [1, 0, "✓ 1 package has a wheel for this target"],
+    [1, 1, "1 checked package has a wheel for this target; 1 more wasn't checked (its index isn't known to be PyPI)"],
+    [1, 2, "1 checked package has a wheel for this target; 2 more weren't checked (their index isn't known to be PyPI)"],
+    [3, 0, "✓ All 3 packages have a wheel for this target"],
+    [3, 1, "All 3 checked packages have a wheel for this target; 1 more wasn't checked (its index isn't known to be PyPI)"],
+    [3, 2, "All 3 checked packages have a wheel for this target; 2 more weren't checked (their index isn't known to be PyPI)"],
+  ];
+  for (const [packages, notChecked, expected] of cases) {
+    assert.equal(verdictText({ gaps: 0, unknown: 0, packages, targets: 1 }, notChecked), expected);
+  }
+  assert.equal(verdictText({ gaps: 1, packages: 1, targets: 1 }), "1 package has no wheel for this target");
+  assert.equal(
+    verdictText({ gaps: 1, packages: 3, targets: 2 }, 1),
+    "1 of 3 checked packages has no wheel for at least one of the 2 targets; 1 more wasn't checked (its index isn't known to be PyPI)",
+  );
+  assert.equal(
+    verdictText({ gaps: 0, unknown: 1, packages: 3, targets: 2 }, 2),
+    "No package is missing a wheel, but 1 of 3 couldn't be checked on some targets; 2 more weren't checked (their index isn't known to be PyPI)",
+  );
+});
+
 test("shareText formats clean, gaps, unknowns, single target, and special characters as plain text", () => {
   const url = "https://wheelgap.github.io/tracker/check/?repo=owner/name";
   const sixPlatforms = ["linux-x86_64", "linux-aarch64", "musl-x86_64", "macos-arm64", "win-amd64", "win-arm64"];
@@ -572,6 +595,16 @@ test("a platform's tile shows a ✓ only when every package was checked and has 
   assert.deepEqual(tileText({ wheel: 9, source: 0, missing: 0, unknown: 1 }, false), { mark: "?", note: "1 unknown" });
   assert.deepEqual(tileText({ wheel: 0, source: 0, missing: 0, unknown: 18 }, false), { mark: "?", note: "18 unknown" });
   assert.deepEqual(tileText({ wheel: 0, source: 0, missing: 0, unknown: 0 }, true), { mark: "–", note: "not locked" });
+});
+
+test("a platform's tile includes private packages in its unchecked count", () => {
+  const counts = { wheel: 3, source: 0, missing: 0, unknown: 0 };
+  assert.deepEqual(tileText(counts, false, 0), { mark: "✓", note: "all wheels" });
+  assert.deepEqual(tileText(counts, false, 1), { mark: "?", note: "1 not checked" });
+  assert.deepEqual(tileText(counts, false, 2), { mark: "?", note: "2 not checked" });
+  assert.deepEqual(tileText({ ...counts, unknown: 1 }, false, 2), { mark: "?", note: "3 not checked" });
+  assert.deepEqual(tileText({ ...counts, source: 1 }, false, 2), { mark: "1", note: "without a wheel" });
+  assert.deepEqual(tileText(counts, true, 2), { mark: "–", note: "not locked" });
 });
 
 test("the page says why lookups got no answer, and nothing when they all did", () => {

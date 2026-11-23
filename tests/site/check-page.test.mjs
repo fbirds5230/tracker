@@ -478,6 +478,17 @@ test("a clean verdict offers the README badge in the verdict card and hides it f
   const withPrivate = run([], 5, undefined, { private: ["corp"], skipped: ["corp"] });
   assert.equal(withPrivate("verdict-badge").hidden, true);
   assert.equal(withPrivate("next-title").textContent, "Fix it");
+  assert.equal(withPrivate("verdict section").classList.has("clean"), false);
+  assert.doesNotMatch(withPrivate("verdict").textContent, /✓/);
+  assert.match(withPrivate("verdict").textContent, /1 more wasn't checked/);
+
+  // One displayed name can represent several unchecked requirements: use the driver's exact count.
+  const repeatedPrivate = run([], 1, undefined, { private: ["corp"], private_count: 2, skipped: ["corp"] });
+  assert.equal(repeatedPrivate("verdict section").classList.has("clean"), false);
+  assert.equal(
+    repeatedPrivate("verdict").textContent,
+    "1 checked package has a wheel for this target; 2 more weren't checked (their index isn't known to be PyPI)",
+  );
 
   // Both new copy buttons use copy() like the existing ones.
   assert.match(source, /\$\("copy-verdict-badge"\)\.onclick = \(e\) => copy\(e\.currentTarget, \$\("badge-md"\)\.textContent, "Badge Markdown copied"\);/);
@@ -1194,4 +1205,36 @@ test("an unknown row's reason is its Fix text, so a touch screen shows it too", 
 test("a truncated file list passes no settings-file list, so an extra-index file stays private", () => {
   // The driver refuses a null list (test_check_driver.py); a partial one could miss a root uv.toml or pyproject.toml.
   assert.match(read("worker.mjs"), /configs: tree\.truncated \? null : plan\.configs/);
+});
+
+test("renderTargets passes the private requirement count to the platform tiles", () => {
+  const source = read("check.mjs").match(/^function renderTargets\(\) \{.*?^}$/ms);
+  assert.ok(source, "renderTargets is in check.mjs");
+  const made = new Map();
+  const element = (key) => {
+    if (!made.has(key)) made.set(key, { replaceChildren() {} });
+    return made.get(key);
+  };
+  const nodes = [];
+  const el = (tag, attrs = {}, ...kids) => {
+    const node = { tag, attrs, kids };
+    nodes.push(node);
+    return node;
+  };
+  const label = "3.14 linux-x86_64";
+  const state = {
+    python: "3.14", platform: null,
+    result: {
+      lockfile: "Pipfile.lock", private: ["corp"], private_count: 2, outside_lock: [],
+      targets: [{ label, python: "3.14", platform: "linux-x86_64" }],
+      per_target: { [label]: { wheel: 1, source: 0, missing: 0, unknown: 0 } },
+    },
+  };
+  const renderTargets = new Function("$", "state", "el", "sortPythons", "tileText", "NAMES", `${source[0]}; return renderTargets;`)(
+    element, state, el, checkLogic.sortPythons, checkLogic.tileText, {},
+  );
+  renderTargets();
+  const tile = nodes.find((node) => node.attrs.class === "pct");
+  assert.equal(tile.kids[0], "?");
+  assert.equal(tile.kids[1].attrs.text, "2 not checked");
 });

@@ -370,15 +370,16 @@ function render() {
 function renderVerdict() {
   const r = state.result;
   const h = headline(r);
+  const notChecked = r.private_count ?? (r.private || []).length;
   const privateReason = privatePyprojectReason(r);
   const card = $("verdict").closest("section");
   const repoName = `${state.repo.owner}/${state.repo.name}`;
-  const isClean = h.gaps === 0 && h.unknown === 0 && h.targets > 0 && h.packages > 0;
+  const isClean = h.gaps === 0 && h.unknown === 0 && h.targets > 0 && h.packages > 0 && notChecked === 0;
   card.classList.toggle("clean", isClean);
   // Not offered while a private index's packages went unchecked: "keep it that way" would claim a pass for them too.
-  $("verdict-badge").hidden = !isClean || (r.private || []).length > 0;
+  $("verdict-badge").hidden = !isClean;
   $("verdict").textContent = privateReason ? `${r.lockfile} wasn't checked: ${privateReason}`
-    : h.targets === 0 ? `${repoName}'s lockfile leaves out every Python picked` : verdictText(h);
+    : h.targets === 0 ? `${repoName}'s lockfile leaves out every Python picked` : verdictText(h, notChecked);
   const steps = nextSteps(state.pythons, state.platforms);
   $("next").hidden = !steps.length;
   $("next-buttons").replaceChildren(...steps.map((s) => el("button", {
@@ -484,6 +485,7 @@ function renderSetup() {
 
 function renderTargets() {
   const r = state.result;
+  const notChecked = r.private_count ?? (r.private || []).length;
   const pys = sortPythons(r.targets.map((t) => t.python));
   $("python-tabs").replaceChildren(...pys.map((v) => el("button", {
     type: "button", "aria-pressed": String(v === state.python), text: v, "data-key": `py:${v}`,
@@ -493,7 +495,7 @@ function renderTargets() {
   const rows = r.targets.filter((t) => t.python === state.python).map((t) => {
     const c = r.per_target[t.label];
     const total = c.wheel + c.source + c.missing + c.unknown;
-    const tile = tileText(c, outside);
+    const tile = tileText(c, outside, notChecked);
     const pct = (k) => (total ? (100 * c[k]) / total : 0);
     const pressed = state.platform === t.platform;
     return el("li", {}, el("button", {

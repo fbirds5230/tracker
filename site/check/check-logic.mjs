@@ -210,10 +210,11 @@ export function unreadableReason(result) {
 // A platform's tile, from its counts ({wheel, source, missing, unknown}): how many packages have no wheel there, a ✓
 // only when every package was checked and has one, and a ? when none is known to lack one but some couldn't be
 // checked, where a ✓ would read as a pass. `outside`: the lock leaves this Python out, so nothing is counted.
-export function tileText(c, outside) {
+export function tileText(c, outside, notChecked = 0) {
   if (outside) return { mark: "–", note: "not locked" };
   const without = c.source + c.missing; // unknown is in the tooltip, never counted as "without a wheel"
   if (without) return { mark: String(without), note: "without a wheel" };
+  if (notChecked) return { mark: "?", note: `${notChecked + c.unknown} not checked` };
   return c.unknown ? { mark: "?", note: `${c.unknown} unknown` } : { mark: "✓", note: "all wheels" };
 }
 
@@ -543,16 +544,22 @@ export function fixPrompt(repoName, result, fixes, pythons, platforms, gapWheels
 }
 
 // The verdict's headline sentence.
-export function verdictText(h) {
+export function verdictText(h, notChecked = 0) {
   // Nothing to count (every package skipped, or none listed): never a ✓, which would read as a pass.
   if (h.packages === 0) return "No packages were checked";
+  const tail = notChecked ? `; ${notChecked} more ${notChecked === 1 ? "wasn't" : "weren't"} checked (${notChecked === 1 ? "its" : "their"} index isn't known to be PyPI)` : "";
+  const checked = notChecked ? "checked " : "";
   const where = h.targets === 1 ? "this target" : `all ${h.targets} targets`;
   if (h.gaps === 0 && h.unknown) {
-    return `No package is missing a wheel, but ${h.unknown} of ${h.packages} couldn't be checked on ${h.targets === 1 ? "this target" : "some targets"}`;
+    return `No package is missing a wheel, but ${h.unknown} of ${h.packages} couldn't be checked on ${h.targets === 1 ? "this target" : "some targets"}${tail}`;
   }
-  if (h.gaps === 0) return `✓ All ${h.packages} packages have a wheel for ${where}`;
+  if (h.gaps === 0) {
+    const count = h.packages === 1 ? `1 ${checked}package has` : `All ${h.packages} ${checked}packages have`;
+    return `${notChecked ? "" : "✓ "}${count} a wheel for ${where}${tail}`;
+  }
   const some = h.targets === 1 ? "this target" : `at least one of the ${h.targets} targets`;
-  return `${h.gaps} of ${h.packages} packages ${h.gaps === 1 ? "has" : "have"} no wheel for ${some}`;
+  const count = h.packages === 1 ? `1 ${checked}package has` : `${h.gaps} of ${h.packages} ${checked}packages ${h.gaps === 1 ? "has" : "have"}`;
+  return `${count} no wheel for ${some}${tail}`;
 }
 
 // One-line plain-text summary of a result, ending with the share link. Built as text, never as HTML. The line is
