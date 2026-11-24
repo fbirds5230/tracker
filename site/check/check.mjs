@@ -461,8 +461,9 @@ function renderVerdict() {
   const privateIndex = r.private || [];
   if (privateReason) {
     // The zero-package result hides "Fix it", so keep the local command here with the explanation.
-    alerts.push(el("p", { class: "alert warn" },
-      "Check locally with ", el("code", { text: cliCommand(r, state.pythons, state.platforms) }),
+    const command = cliCommand(r, state.pythons, state.platforms);
+    if (command) alerts.push(el("p", { class: "alert warn" },
+      "Check locally with ", el("code", { text: command }),
       " in a checkout (add --index-url for your index), or commit a uv.lock: this page reads its recorded files without PyPI lookups."));
   } else if (privateIndex.length) {
     alerts.push(el("p", { class: "alert warn", text: privateText(r) }));
@@ -661,12 +662,14 @@ function renderNext() {
   const h = headline(r);
   const isClean = h.gaps === 0 && h.unknown === 0 && !h.unknownTargets && h.targets > 0 && h.packages > 0;
   const undecided = h.unknownTargets > 0 && h.gaps === 0;
-  $("next-title").textContent = isClean && !notCheckedCount(r) ? "Keep it green" : undecided ? "Check it locally" : "Fix it";
-  $("copy-prompt").hidden = isClean || undecided;
-  $("prompt-note").hidden = isClean || undecided;
+  const command = cliCommand(r, state.pythons, state.platforms);
+  $("next-title").textContent = !command ? "Choose a covered target" : isClean && !notCheckedCount(r) ? "Keep it green" : undecided ? "Check it locally" : "Fix it";
+  $("copy-prompt").hidden = isClean || undecided || !command;
+  $("prompt-note").hidden = isClean || undecided || !command;
   // A command for the visitor's own index needs the placeholder the private-index alert asks them to add.
   const indexFlag = notCheckedCount(r) ? " --index-url YOUR_INDEX_URL" : "";
-  $("cli").textContent = cliCommand(r, state.pythons, state.platforms) + indexFlag;
+  $("cli").textContent = command ? command + indexFlag
+    : "No selected target is known to be covered by the lockfile's environments. Choose a covered target before checking again.";
   // The link names the lockfile only when a visit with the repo alone would start from another one.
   $("badge-md").textContent = badgeMarkdown(state.repo, r.lockfile, autoPick(state.plan.lockfiles.filter((l) => !l.added), null, state.pickContext ?? {}).lock?.path ?? null);
   const caveats = [

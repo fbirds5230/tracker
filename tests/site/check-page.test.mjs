@@ -1455,6 +1455,7 @@ test("uv environments distinguish excluded and undecided platforms throughout th
   assert.deepEqual(tiles.map((tile) => [tile.kids[0], tile.kids[1].attrs.text]), [["✓", "all wheels"], ["–", "not locked"]]);
   assert.deepEqual(page.counted("python"), ["3.13"]);
   assert.deepEqual(page.counted("platform"), ["linux-x86_64"]);
+  assert.equal(page.$("cli").textContent, "uvx wheelgap uv.lock -p 3.13 -t linux-x86_64");
   assert.doesNotMatch(page.$("gaps-note").textContent, /every package installs from a wheel here/);
 
   const selected = run({}, "win-amd64");
@@ -1468,6 +1469,10 @@ test("uv environments distinguish excluded and undecided platforms throughout th
   assert.equal(none.classes.has("clean"), false);
   assert.deepEqual(none.counted("platform"), []);
   assert.match(none.$("gaps-note").textContent, /not locked/);
+  assert.match(none.$("cli").textContent, /No selected target is known to be covered/);
+  assert.doesNotMatch(none.$("cli").textContent, /uvx wheelgap|null| -p | -t /);
+  assert.equal(none.$("copy-prompt").hidden, true);
+  assert.equal(none.$("prompt-note").hidden, true);
 
   const row = { name: "fastlib", version: "1.0", lookup: false, gaps: [linux.label], unknown: [],
     statuses: { [linux.label]: "missing", [windows.label]: "source" } };
@@ -1487,6 +1492,7 @@ test("uv environments distinguish excluded and undecided platforms throughout th
   assert.equal(mixed.$("copy-prompt").hidden, true);
   assert.match(mixed.$("verdict").textContent, /1 target couldn't be checked.*lock's environments/);
   assert.deepEqual(mixed.counted("platform"), ["linux-x86_64"]);
+  assert.equal(mixed.$("cli").textContent, "uvx wheelgap uv.lock -p 3.13 -t linux-x86_64");
   const unknownTile = mixed.$("platforms").children[1].kids[0].kids;
   assert.equal(unknownTile.find((node) => node.attrs.class === "bar").attrs.title, reason);
   const unknownMark = unknownTile.find((node) => node.attrs.class === "pct");
@@ -1501,6 +1507,8 @@ test("uv environments distinguish excluded and undecided platforms throughout th
   assert.match(unknownOnly.$("verdict").textContent, /No targets were checked.*lock's environments/);
   assert.deepEqual(unknownOnly.counted("platform"), []);
   assert.match(unknownOnly.$("gaps-note").textContent, /marked \?.*lock's environments/);
+  assert.match(unknownOnly.$("cli").textContent, /No selected target is known to be covered/);
+  assert.doesNotMatch(unknownOnly.$("cli").textContent, /uvx wheelgap|null| -p | -t /);
 
   const unknownWithGap = run({ ...unknown, rows: [row] }, null, lab);
   assert.equal(unknownWithGap.$("next-title").textContent, "Fix it");

@@ -531,6 +531,71 @@ test("the CLI command and the fix prompt reproduce the check", () => {
   assert.equal(packageCliCommand("httpie; rm -rf /", ["3.14"], ["linux-x86_64"]), null);
 });
 
+test("the CLI command and fix prompt leave refused environments out", () => {
+  const pythons = ["3.13"];
+  const platforms = ["linux-x86_64", "win-amd64"];
+  const targets = platforms.map((platform) => ({ label: `3.13 ${platform}`, python: "3.13", platform }));
+  for (const environments of [
+    { outside_environments: ["3.13 win-amd64"] },
+    { unknown_environments: { "3.13 win-amd64": "the lock's environments don't say whether this target is covered" } },
+  ]) {
+    const res = { lockfile: "uv.lock", targets, rows: [row("fastlib", "1.0", [targets[0].label])], ...environments };
+    const command = cliCommand(res, pythons, platforms);
+    assert.equal(command, "uvx wheelgap uv.lock -p 3.13 -t linux-x86_64");
+    const prompt = fixPrompt("paperless-ngx/paperless-ngx", res, {}, pythons, platforms);
+    assert.equal(prompt.split("\n").find((line) => line.startsWith("  uvx wheelgap")), `  ${command}`);
+    assert.match(prompt.split("\n")[0], /targets we checked \(3\.13 linux-x86_64\)/);
+    assert.doesNotMatch(prompt, /win-amd64/);
+  }
+});
+
+test("the CLI keeps the larger safe Python/platform rectangle", () => {
+  const pythons = ["3.13", "3.14", "3.15"];
+  const platforms = ["linux-x86_64", "win-amd64", "macos-arm64"];
+  const targets = pythons.flatMap((python) => platforms.map((platform) => ({ label: `${python} ${platform}`, python, platform })));
+  const command = (outside_environments) => cliCommand({ lockfile: "uv.lock", targets, outside_environments }, pythons, platforms);
+  // Dropping one platform keeps six targets; dropping both affected Pythons keeps only three.
+  assert.equal(command(["3.13 win-amd64", "3.14 win-amd64"]), "uvx wheelgap uv.lock -p 3.13,3.14,3.15 -t linux-x86_64,macos-arm64");
+  // The opposite shape keeps more targets by dropping one Python, not two platforms.
+  assert.equal(command(["3.14 linux-x86_64", "3.14 win-amd64"]), "uvx wheelgap uv.lock -p 3.13,3.15 -t linux-x86_64,win-amd64,macos-arm64");
+  assert.deepEqual(pythons, ["3.13", "3.14", "3.15"]);
+  assert.deepEqual(platforms, ["linux-x86_64", "win-amd64", "macos-arm64"]);
+});
+
+test("crossed environment restrictions fall back to one covered pair", () => {
+  const pythons = ["3.13", "3.14"];
+  const platforms = ["linux-x86_64", "win-amd64"];
+  const res = {
+    lockfile: "uv.lock", rows: [row("fastlib", "1.0", ["3.13 linux-x86_64", "3.14 win-amd64"])],
+    targets: pythons.flatMap((python) => platforms.map((platform) => ({ label: `${python} ${platform}`, python, platform }))),
+    outside_environments: ["3.13 win-amd64"],
+    unknown_environments: { "3.14 linux-x86_64": "undecided" },
+  };
+  const command = cliCommand(res, pythons, platforms);
+  assert.equal(command, "uvx wheelgap uv.lock -p 3.13 -t linux-x86_64");
+  const prompt = fixPrompt("o/r", res, {}, pythons, platforms);
+  assert.equal(prompt.split("\n").find((line) => line.startsWith("  uvx wheelgap")), `  ${command}`);
+  assert.match(prompt.split("\n")[0], /targets we checked \(3\.13 linux-x86_64, 3\.14 win-amd64\)/);
+  assert.match(prompt, /This command checks only Python 3\.13 on linux-x86_64; check the other listed targets separately\./);
+  // While a different selection is being checked, an unseen pair isn't a covered fallback.
+  assert.equal(cliCommand(res, ["3.15"], platforms), null);
+  assert.equal(cliCommand(res, ["3.14"], platforms), "uvx wheelgap uv.lock -p 3.14 -t win-amd64");
+});
+
+test("no CLI command or fix command is offered when every selected environment is refused", () => {
+  const targets = [{ label: "3.13 win-amd64", python: "3.13", platform: "win-amd64" }];
+  for (const environments of [
+    { outside_environments: [targets[0].label] },
+    { unknown_environments: { [targets[0].label]: "undecided" } },
+  ]) {
+    const res = { lockfile: "uv.lock", targets, rows: [], ...environments };
+    assert.equal(cliCommand(res, ["3.13"], ["win-amd64"]), null);
+    const prompt = fixPrompt("o/r", res, {}, ["3.13"], ["win-amd64"]);
+    assert.match(prompt, /No selected target is known to be covered/);
+    assert.doesNotMatch(prompt, /uvx wheelgap|null| -p | -t /);
+  }
+});
+
 test("projectNameFromMetadata reads plain names from setup.cfg and pyproject.toml and rejects dynamic or invalid ones", () => {
   assert.equal(projectNameFromMetadata("setup.cfg", "[metadata]\nname = httpie\nversion = 3.2.4\n"), "httpie");
   assert.equal(projectNameFromMetadata("setup.cfg", "[metadata]\nname = attr: pkg.__name__\n"), null);

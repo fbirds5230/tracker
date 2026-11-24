@@ -477,10 +477,35 @@ export function headline(result) {
   return { gaps: gaps.size, unknown: unknown.size, packages: result.packages, targets: included.length - unknownTargets, unknownTargets };
 }
 
-// The `uvx wheelgap` command that reproduces the result locally.
+function cliTargets(result, pythons, platforms) {
+  if (!pythons.length || !platforms.length) return null;
+  const refused = (result.targets || []).filter((t) =>
+    (result.outside_environments || []).includes(t.label) || result.unknown_environments?.[t.label]);
+  if (!refused.length) return { pythons, platforms, covered: null };
+  const covered = result.targets.filter((t) => !refused.includes(t) && pythons.includes(t.python) && platforms.includes(t.platform));
+  if (!covered.length) return null;
+  const has = (python, platform) => covered.some((t) => t.python === python && t.platform === platform);
+  // -p and -t form a Cartesian product: keep the larger rectangle with no refused or unchecked pair.
+  const safePlatforms = platforms.filter((platform) => pythons.every((python) => has(python, platform)));
+  const safePythons = pythons.filter((python) => platforms.every((platform) => has(python, platform)));
+  if (safePlatforms.length && safePlatforms.length * pythons.length >= safePythons.length * platforms.length) {
+    platforms = safePlatforms;
+  } else if (safePythons.length) {
+    pythons = safePythons;
+  } else {
+    // Crossed exclusions can empty both rectangles even when an individual pair is covered.
+    pythons = [covered[0].python];
+    platforms = [covered[0].platform];
+  }
+  return { pythons, platforms, covered };
+}
+
+// The `uvx wheelgap` command for covered targets, or null when none of the selection can be checked.
 export function cliCommand(result, pythons, platforms) {
+  const selected = cliTargets(result, pythons, platforms);
+  if (!selected) return null;
   const lock = /^[A-Za-z0-9._\/-]+$/.test(result.lockfile) ? result.lockfile : `'${result.lockfile.replace(/'/g, "")}'`;
-  return `uvx wheelgap ${lock} -p ${sortPythons(pythons).join(",")} -t ${platforms.join(",")}`;
+  return `uvx wheelgap ${lock} -p ${sortPythons(selected.pythons).join(",")} -t ${selected.platforms.join(",")}`;
 }
 
 const PACKAGE_NAME = /^[A-Za-z0-9](?:[A-Za-z0-9._-]{0,98}[A-Za-z0-9])?$/;
@@ -635,6 +660,8 @@ export function fixLinks(row, f, trackerPkg = null, gapWheels = null) {
 
 // A prompt to paste into Claude Code (or any coding agent): the gaps, the bumps that fix them, and how to confirm.
 export function fixPrompt(repoName, result, fixes, pythons, platforms, gapWheels = null, tracker = {}) {
+  const selected = cliTargets(result, pythons, platforms);
+  if (!selected) return "No selected target is known to be covered by the lockfile's environments. Choose a covered target before checking again.";
   const groups = { all: [], some: [], loses: [], none: [], private: [], pending: [] };
   for (const r of result.rows) {
     const f = fixFor(r, fixes);
@@ -648,8 +675,10 @@ export function fixPrompt(repoName, result, fixes, pythons, platforms, gapWheels
       groups[f.kind].push(`- ${r.name} ${r.version}: ${gaps}${ask}`);
     } else groups[f.kind].push(`- ${r.name} ${r.version}: ${gaps}`);
   }
+  const where = selected.covered ? selected.covered.map((t) => t.label).join(", ")
+    : `Python ${sortPythons(pythons).join(", ")} on ${platforms.join(", ")}`;
   const lines = [
-    `In ${repoName}, wheelgap found dependencies in ${result.lockfile} with no prebuilt wheel for some of the platforms we target (Python ${sortPythons(pythons).join(", ")} on ${platforms.join(", ")}), so they'd be compiled from source or fail to install.`,
+    `In ${repoName}, wheelgap found dependencies in ${result.lockfile} with no prebuilt wheel for some of the targets we checked (${where}), so they'd be compiled from source or fail to install.`,
     "",
   ];
   const section = (key, title) => groups[key].length && lines.push(title, ...groups[key], "");
@@ -668,6 +697,8 @@ export function fixPrompt(repoName, result, fixes, pythons, platforms, gapWheels
   lines.push(
     "Check each bump against our version constraints (a new major version may need code changes), update the lockfile with the project's own tool, and confirm with:",
     `  ${cliCommand(result, pythons, platforms)}`,
+    ...(selected.covered && selected.covered.length > selected.pythons.length * selected.platforms.length
+      ? [`This command checks only Python ${sortPythons(selected.pythons).join(", ")} on ${selected.platforms.join(", ")}; check the other listed targets separately.`] : []),
     "",
     "To let the agent check packages itself next time: claude mcp add wheelgap -- uvx --from wheelgap wheelgap-mcp",
   );
