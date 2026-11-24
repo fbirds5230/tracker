@@ -474,15 +474,35 @@ const result = {
 test("rowsFor lists one Python's gaps, most first; headline counts distinct packages on counted targets", () => {
   assert.deepEqual(rowsFor(result, "3.14").map((r) => [r.name, r.here.length]), [["b", 2], ["a", 1]]);
   assert.deepEqual(rowsFor(result, "3.15"), []); // outside the lock: check() reports no gaps there
-  assert.deepEqual(headline(result), { gaps: 2, unknown: 0, packages: 10, targets: 2 });
+  assert.deepEqual(headline(result), { gaps: 2, unknown: 0, packages: 10, targets: 2, unknownTargets: 0 });
 });
 
 test("headline leaves targets outside uv environments out of the counted total", () => {
   const excluded = { ...result, outside_environments: ["3.14 win-arm64"], rows: [] };
-  assert.deepEqual(headline(excluded), { gaps: 0, unknown: 0, packages: 10, targets: 1 });
+  assert.deepEqual(headline(excluded), { gaps: 0, unknown: 0, packages: 10, targets: 1, unknownTargets: 0 });
   const none = { ...excluded, outside_environments: ["3.14 win-arm64", "3.14 linux-x86_64"] };
   assert.equal(headline(none).targets, 0);
   assert.match(shareText("o/r", headline(none), [], [], "https://example.com"), /lockfile leaves out every target picked/);
+});
+
+test("undecided uv environments are unknown targets in the verdict and copied result", () => {
+  const undecided = {
+    ...result, rows: [],
+    unknown_environments: { "3.14 win-arm64": "the lock's environments don't say whether this target is covered" },
+  };
+  const h = headline(undecided);
+  assert.deepEqual(h, { gaps: 0, unknown: 0, packages: 10, targets: 1, unknownTargets: 1 });
+  for (const summary of [h, { ...h, targets: 0, packages: 0 }, { ...h, gaps: 2 }, { ...h, unknown: 1 }]) {
+    const verdict = verdictText(summary);
+    const copied = shareText("o/r", summary, ["3.14"], ["linux-x86_64"], "https://example.com");
+    for (const text of [verdict, copied]) {
+      assert.match(text, /1 target couldn't be checked.*lock's environments/);
+      assert.doesNotMatch(text, /✓|lockfile leaves out every target/);
+    }
+  }
+  const none = { ...h, targets: 0, unknownTargets: 2, packages: 0 };
+  assert.match(verdictText(none), /No targets were checked.*2 targets couldn't be checked/);
+  assert.match(shareText("o/r", none, [], [], "https://example.com"), /no targets were checked.*2 targets couldn't be checked/);
 });
 
 test("the shared clean result doesn't imply excluded Python/platform pairs were checked", () => {
@@ -713,7 +733,7 @@ test("unknown cells are listed but not counted as missing a wheel", () => {
     outside_lock: [],
     rows: [row("u", "1", [], { "3.14 linux-x86_64": "unknown", "3.14 win-arm64": "wheel" }, { unknown: ["3.14 linux-x86_64"] })],
   };
-  assert.deepEqual(headline(res), { gaps: 0, unknown: 1, packages: 10, targets: 3 });
+  assert.deepEqual(headline(res), { gaps: 0, unknown: 1, packages: 10, targets: 3, unknownTargets: 0 });
   assert.deepEqual(rowsFor(res, "3.14").map((r) => r.name), ["u"]);
   assert.equal(verdictText(headline(res)), "No package is missing a wheel, but 1 of 10 couldn't be checked on some targets");
 });

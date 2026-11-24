@@ -49,8 +49,8 @@ test("a result with no package checked shows the verdict and the setup, but no b
   assert.ok(source, "render is in check.mjs");
   const parts = ["hideResultSections", "renderVerdict", "renderSetup", "renderTargets", "renderTable", "renderNext"];
   const calls = [];
-  const render = (packages) => new Function("state", ...parts, `${source[0]}; return render;`)(
-    { result: { packages } },
+  const render = (packages, unknown_environments = {}) => new Function("state", ...parts, `${source[0]}; return render;`)(
+    { result: { packages, unknown_environments } },
     ...parts.map((name) => (...args) => { calls.push([name, ...args]); }),
   );
   render(0)(); // every package skipped as a private index's, or a file that lists none
@@ -58,6 +58,9 @@ test("a result with no package checked shows the verdict and the setup, but no b
   calls.length = 0;
   render(3)();
   assert.deepEqual(calls.map(([name]) => name), parts);
+  calls.length = 0;
+  render(0, { "3.13 win-amd64": "the lock's environments don't say whether this target is covered" })();
+  assert.deepEqual(calls.map(([name]) => name), parts); // the target's ? and reason still need to be shown
 });
 
 // worker.mjs needs a browser and Pyodide, so its check() is run on stand-ins for both: `needs` is what the driver asks
@@ -1390,9 +1393,9 @@ test("the gaps note never says every package has a wheel when a private index's 
   );
 });
 
-test("uv environments leave excluded platforms uncounted in the tiles, alert, table and copied result", () => {
+test("uv environments distinguish excluded and undecided platforms throughout the result", () => {
   const source = read("check.mjs");
-  const functions = ["notCheckedCount", "renderVerdict", "renderTargets", "renderTable"]
+  const functions = ["notCheckedCount", "renderVerdict", "renderTargets", "renderTable", "renderNext"]
     .map((name) => source.match(new RegExp(`^function ${name}\\(.*?^}$`, "ms"))[0]).join("\n");
   const linux = { label: "3.13 linux-x86_64", python: "3.13", platform: "linux-x86_64" };
   const windows = { label: "3.13 win-amd64", python: "3.13", platform: "win-amd64" };
@@ -1413,6 +1416,7 @@ test("uv environments leave excluded platforms uncounted in the tiles, alert, ta
       repo: { owner: "paperless-ngx", name: "paperless-ngx" }, ref: "main",
       python: "3.13", pythons: ["3.13"], platforms: ["linux-x86_64", "win-amd64"], platform,
       showAll: false, fixes: {}, gapWheels: null, lab,
+      plan: { lockfiles: [{ path: "uv.lock" }] },
       result: {
         lockfile: "uv.lock", packages: 2, outside_lock: [], outside_environments: [windows.label],
         targets: [linux, windows], skipped: [], private: [], rows: [],
@@ -1425,7 +1429,7 @@ test("uv environments leave excluded platforms uncounted in the tiles, alert, ta
     };
     const env = { ...checkLogic, $, state, el, NAMES: Object.fromEntries(checkLogic.PLATFORMS), SHOWN: 60,
       STATUS_TEXT: {}, LAB_SHORT: {}, FIX_TEXT: { private: () => "not looked up" } };
-    new Function(...Object.keys(env), `${functions}; renderVerdict(); renderTargets(); renderTable();`)(...Object.values(env));
+    new Function(...Object.keys(env), `${functions}; renderVerdict(); renderTargets(); renderTable(); renderNext();`)(...Object.values(env));
     const countedSource = source.match(/^const counted = (.*);$/m)[1];
     const counted = new Function(...Object.keys(env), `return ${countedSource};`)(...Object.values(env));
     return { $, classes, counted };
@@ -1460,6 +1464,37 @@ test("uv environments leave excluded platforms uncounted in the tiles, alert, ta
   const cells = withLab.$("gap-table").children[1].kids[0].kids;
   assert.deepEqual(cells[2].kids[0].attrs, { class: "na", text: "–", title: "not locked for this target" });
   assert.match(run({ rows: [row], outside_environments: [] }, null, lab).$("gaps-note").textContent, /build lab/);
+
+  const reason = "the lock's environments don't say whether this target is covered";
+  const unknown = { outside_environments: [], unknown_environments: { [windows.label]: reason } };
+  const mixed = run(unknown);
+  assert.equal(mixed.classes.has("clean"), false);
+  assert.equal(mixed.$("verdict-badge").hidden, true);
+  assert.equal(mixed.$("next-title").textContent, "Check it locally");
+  assert.equal(mixed.$("copy-prompt").hidden, true);
+  assert.match(mixed.$("verdict").textContent, /1 target couldn't be checked.*lock's environments/);
+  assert.deepEqual(mixed.counted("platform"), ["linux-x86_64"]);
+  const unknownTile = mixed.$("platforms").children[1].kids[0].kids;
+  assert.equal(unknownTile.find((node) => node.attrs.class === "bar").attrs.title, reason);
+  const unknownMark = unknownTile.find((node) => node.attrs.class === "pct");
+  assert.deepEqual([unknownMark.kids[0], unknownMark.kids[1].attrs.text], ["?", "unknown"]);
+  assert.match(mixed.$("gaps-note").textContent, /marked \?.*lock's environments/);
+  assert.doesNotMatch(mixed.$("gaps-note").textContent, /every package installs from a wheel/);
+
+  const unknownOnly = run({ ...unknown, targets: [windows], packages: 0 });
+  assert.equal(unknownOnly.classes.has("clean"), false);
+  assert.equal(unknownOnly.$("verdict-badge").hidden, true);
+  assert.equal(unknownOnly.$("copy-prompt").hidden, true);
+  assert.match(unknownOnly.$("verdict").textContent, /No targets were checked.*lock's environments/);
+  assert.deepEqual(unknownOnly.counted("platform"), []);
+  assert.match(unknownOnly.$("gaps-note").textContent, /marked \?.*lock's environments/);
+
+  const unknownWithGap = run({ ...unknown, rows: [row] }, null, lab);
+  assert.equal(unknownWithGap.$("next-title").textContent, "Fix it");
+  assert.equal(unknownWithGap.$("copy-prompt").hidden, false);
+  assert.doesNotMatch(unknownWithGap.$("gaps-note").textContent, /build lab/);
+  const unknownCell = unknownWithGap.$("gap-table").children[1].kids[0].kids[2];
+  assert.deepEqual(unknownCell.kids[0].attrs, { class: "status s-unknown", text: "? unknown", title: reason });
 });
 
 test("the uv environments alert names Python when restrictions differ between versions", () => {

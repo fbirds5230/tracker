@@ -25,7 +25,7 @@ import wheelgap
 from packaging.utils import canonicalize_name
 from wheelgap import api, offline, origin, pypi, sources, suggest_targets
 from wheelgap import suggest as release_suggest
-from wheelgap.check import Row, Status, marker_holds
+from wheelgap.check import Row, Status, marker_value
 from wheelgap.sources import LOCKFILES, Package, Source, SourceError, file_kind, load_file, pythons_outside_lock
 from wheelgap.targets import DEFAULT_PLATFORMS, NEWEST_PYTHON, Target, TargetError
 
@@ -526,6 +526,7 @@ def check(
     for it in the lock, so they'd be false gaps (the CLI rechecks them on PyPI; the page says so instead).
     A uv.lock's supported-markers can also leave out a target: its label is in `outside_environments`, and none of
     its cells count either. uv sync refuses those targets rather than installing from this lock there.
+    Targets the markers can't decide are in `unknown_environments`, with a reason, and aren't checked.
 
     A file that doesn't list every package's files (LOOKUPS: Pipfile.lock, requirements files, pixi.lock,
     pyproject.toml) is checked from PyPI JSON the worker fetched for the lookups needs() named, keyed
@@ -569,6 +570,7 @@ def check(
     )
     extra_pkg_hosts = {pkg: host for host in extra_hosts for pkg in PUBLIC_EXTRA_INDEXES[host]}
     outside_environments: set[str] = set()
+    unknown_environments: dict[str, str] = {}
     if looked_up:
         _fill_lookups(
             source,
@@ -592,16 +594,30 @@ def check(
         except SourceError as e:
             return json.dumps({"error": str(e), "kind": "needs-index"})
         try:
+            outside = set(pythons_outside_lock(source, targets))
             if source.kind == "uv":
                 # Once the pin is 0.14.0 or later, use check.lock_environment_targets(); 0.13.0 doesn't keep these.
                 markers = tomllib.loads(path.read_text(encoding="utf-8")).get("supported-markers", [])
-                outside_environments = {
-                    t.label(True) for t in targets if markers and not any(marker_holds(m, t) for m in markers)
-                }
-            results, source, check_rows = api._check_lockfile(path, targets, online=False, offline=True)
+                if not isinstance(markers, list) or not all(isinstance(m, str) for m in markers):
+                    raise SourceError(f"{path.name}: `supported-markers` isn't a list of strings")
+                for t in targets:
+                    values = {marker_value(m, t) for m in markers}
+                    if not markers or True in values:
+                        continue
+                    if None in values:
+                        if t.python not in outside:
+                            unknown_environments[t.label(True)] = (
+                                "the lock's environments don't say whether this target is covered"
+                            )
+                    else:
+                        outside_environments.add(t.label(True))
+            checked_targets = [t for t in targets if t.label(True) not in unknown_environments]
+            if checked_targets:
+                results, source, check_rows = api._check_lockfile(path, checked_targets, online=False, offline=True)
+            else:
+                results, check_rows = [], []
         except (SourceError, ValueError, OSError) as e:  # ValueError: a lockfile that isn't valid TOML or JSON
             return json.dumps({"error": str(e).replace(f"{root}/", ""), "kind": "source"})
-        outside = set(pythons_outside_lock(source, targets))
     # --suggest's rule (origin.known_pypi): only packages positively from PyPI are looked up there, so a private
     # package's name never goes to pypi.org, and a same-named PyPI project is never offered as its fix. A package
     # resolved for each Python is judged by its resolutions, which the lookups mark, as origin.private_names() does.
@@ -613,12 +629,18 @@ def check(
             on_pypi[key] = on_pypi.get(key, True) and origin.known_pypi(p, source, private=private)
     _targets.clear()
     _targets.update((t.label(True), t) for t in targets)
-    counted = [t for t in targets if t.python not in outside and t.label(True) not in outside_environments]
+    uncounted = outside_environments | unknown_environments.keys()
+    counted = [t for t in targets if t.python not in outside and t.label(True) not in uncounted]
     _last_check = (check_rows, counted, source)
     per_target = {t.label(True): {s.value: 0 for s in (Status.WHEEL, *GAPS, Status.UNKNOWN)} for t in targets}
     rows = []
     for r in results:
-        statuses = {t.label(True): r.statuses.get(t, Status.NOT_NEEDED).value for t in targets}
+        statuses = {
+            t.label(True): (
+                Status.UNKNOWN if t.label(True) in unknown_environments else r.statuses.get(t, Status.NOT_NEEDED)
+            ).value
+            for t in targets
+        }
         for t in counted:
             s = r.statuses.get(t)
             if s is not None and s.value in per_target[t.label(True)]:
@@ -648,6 +670,7 @@ def check(
             "requires_python": source.requires_python,
             "outside_lock": sorted(outside),
             "outside_environments": sorted(outside_environments),
+            "unknown_environments": unknown_environments,
             "packages": len(results),
             "listed": len(source.packages),
             "skipped": sorted({p.name for p in source.packages if p.skip}),

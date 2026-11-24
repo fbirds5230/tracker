@@ -465,8 +465,9 @@ export function rowsFor(result, python) {
 export function headline(result) {
   const gaps = new Set(result.rows.filter((r) => r.gaps.length).map((r) => r.name));
   const unknown = new Set(result.rows.filter((r) => (r.unknown || []).length && !gaps.has(r.name)).map((r) => r.name));
-  const counted = result.targets.filter((t) => !targetOutsideLock(result, t));
-  return { gaps: gaps.size, unknown: unknown.size, packages: result.packages, targets: counted.length };
+  const included = result.targets.filter((t) => !targetOutsideLock(result, t));
+  const unknownTargets = included.filter((t) => result.unknown_environments?.[t.label]).length;
+  return { gaps: gaps.size, unknown: unknown.size, packages: result.packages, targets: included.length - unknownTargets, unknownTargets };
 }
 
 // The `uvx wheelgap` command that reproduces the result locally.
@@ -649,11 +650,18 @@ export function notCheckedTail(n) {
   return n ? `; ${n} more ${n === 1 ? "wasn't" : "weren't"} checked (${n === 1 ? "its" : "their"} index isn't known to be PyPI)` : "";
 }
 
+function unknownEnvironmentsTail(h) {
+  const n = h.unknownTargets;
+  return n ? `; ${n} target${n === 1 ? "" : "s"} couldn't be checked (the lock's environments don't say whether ${n === 1 ? "it is" : "they are"} covered)` : "";
+}
+
 // The verdict's headline sentence.
 export function verdictText(h, notChecked = 0) {
+  const environments = unknownEnvironmentsTail(h);
+  if (h.targets === 0 && h.unknownTargets) return `No targets were checked${environments}`;
   // Nothing to count (every package skipped, or none listed): never a ✓, which would read as a pass.
-  if (h.packages === 0) return "No packages were checked";
-  const tail = notCheckedTail(notChecked);
+  if (h.packages === 0) return `No packages were checked${environments}`;
+  const tail = notCheckedTail(notChecked) + environments;
   const checked = notChecked ? "checked " : "";
   const where = h.targets === 1 ? "this target" : `all ${h.targets} targets`;
   if (h.gaps === 0 && h.unknown) {
@@ -662,7 +670,7 @@ export function verdictText(h, notChecked = 0) {
   }
   if (h.gaps === 0) {
     const count = h.packages === 1 ? `1 ${checked}package has` : `All ${h.packages} ${checked}packages have`;
-    return `${notChecked ? "" : "✓ "}${count} a wheel for ${where}${tail}`;
+    return `${notChecked || h.unknownTargets ? "" : "✓ "}${count} a wheel for ${where}${tail}`;
   }
   const some = h.targets === 1 ? "this target" : `at least one of the ${h.targets} targets`;
   const count = h.packages === 1 ? `1 ${checked}package has` : `${h.gaps} of ${h.packages} ${checked}packages ${h.gaps === 1 ? "has" : "have"}`;
@@ -673,9 +681,11 @@ export function verdictText(h, notChecked = 0) {
 // pasted where the page's alerts don't follow it, so `notChecked` (the packages left off pypi.org as a private
 // index's, which the counts leave out) is said in the line itself, and a result with any is never a ✓.
 export function shareText(repoName, h, pythons, platforms, url, notChecked = 0) {
-  const tail = `${notCheckedTail(notChecked)} (checked with wheelgap) ${url}`;
+  const environments = unknownEnvironmentsTail(h);
+  const tail = `${notCheckedTail(notChecked)}${environments} (checked with wheelgap) ${url}`;
+  if (h.targets === 0 && h.unknownTargets) return `${repoName}: no targets were checked${tail}`;
   if (h.packages === 0) {
-    return `${repoName}: no dependencies were checked (checked with wheelgap) ${url}`;
+    return `${repoName}: no dependencies were checked${environments} (checked with wheelgap) ${url}`;
   }
   if (h.targets === 0) {
     return `${repoName}: lockfile leaves out every target picked${tail}`;
@@ -692,7 +702,7 @@ export function shareText(repoName, h, pythons, platforms, url, notChecked = 0) 
     // cross product was checked (for example Linux on 3.13 and Windows on 3.14 doesn't check Windows on 3.13).
     const where = h.targets < pythons.length * platforms.length
       ? `for the ${h.targets} checked targets` : `on Python ${pyList} for ${plats}`;
-    return `${notChecked ? "" : "✓ "}${repoName}: ${notChecked ? deps.replace(/ (has|have)$/, " checked $1") : deps} a wheel ${where}${tail}`;
+    return `${notChecked || h.unknownTargets ? "" : "✓ "}${repoName}: ${notChecked ? deps.replace(/ (has|have)$/, " checked $1") : deps} a wheel ${where}${tail}`;
   }
   const verb = h.gaps === 1 ? "has" : "have";
   const where = h.targets === 1 ? "1 target" : `at least one of ${h.targets} targets`;
