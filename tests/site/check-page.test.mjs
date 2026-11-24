@@ -465,6 +465,8 @@ test("a clean verdict offers the README badge in the verdict card and hides it f
   assert.equal(clean("next-title").textContent, "Keep it green");
   assert.equal(clean("copy-prompt").hidden, true);
   assert.equal(clean("prompt-note").hidden, true);
+  // Nothing left unchecked: the command is the plain one, with no index placeholder.
+  assert.equal(clean("cli").textContent, "uvx wheelgap uv.lock -p 3.14 -t linux-x86_64");
 
   // Result with gaps: verdict badge hidden, Fix it heading and fix-prompt shown.
   const withGaps = run([{ name: "a", gaps: ["3.14 linux-x86_64"], unknown: [] }]);
@@ -473,6 +475,7 @@ test("a clean verdict offers the README badge in the verdict card and hides it f
   assert.equal(withGaps("next-title").textContent, "Fix it");
   assert.equal(withGaps("copy-prompt").hidden, false);
   assert.equal(withGaps("prompt-note").hidden, false);
+  assert.equal(withGaps("cli").textContent, "uvx wheelgap uv.lock -p 3.14 -t linux-x86_64");
 
   // Result with unknowns: verdict badge hidden, not clean.
   const withUnknowns = run([{ name: "u", gaps: [], unknown: ["3.14 linux-x86_64"] }]);
@@ -491,6 +494,9 @@ test("a clean verdict offers the README badge in the verdict card and hides it f
   assert.equal(withPrivate("verdict section").classList.has("clean"), false);
   assert.doesNotMatch(withPrivate("verdict").textContent, /✓/);
   assert.match(withPrivate("verdict").textContent, /1 more wasn't checked/);
+  // The command offered below is for the visitor's own index, so it must carry the placeholder the alert asks for.
+  // A placeholder, never a real URL, and the flag appears once.
+  assert.equal(withPrivate("cli").textContent, "uvx wheelgap uv.lock -p 3.14 -t linux-x86_64 --index-url YOUR_INDEX_URL");
 
   // Repeated requirements for the same private package count once in the displayed package total.
   const repeatedPrivate = run([], 1, undefined, { private: ["corp"], private_count: 2, skipped: ["corp"] });

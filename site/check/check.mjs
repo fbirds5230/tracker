@@ -664,7 +664,9 @@ function renderNext() {
   $("next-title").textContent = isClean && !notCheckedCount(r) ? "Keep it green" : undecided ? "Check it locally" : "Fix it";
   $("copy-prompt").hidden = isClean || undecided;
   $("prompt-note").hidden = isClean || undecided;
-  $("cli").textContent = cliCommand(r, state.pythons, state.platforms);
+  // A command for the visitor's own index needs the placeholder the private-index alert asks them to add.
+  const indexFlag = notCheckedCount(r) ? " --index-url YOUR_INDEX_URL" : "";
+  $("cli").textContent = cliCommand(r, state.pythons, state.platforms) + indexFlag;
   // The link names the lockfile only when a visit with the repo alone would start from another one.
   $("badge-md").textContent = badgeMarkdown(state.repo, r.lockfile, autoPick(state.plan.lockfiles.filter((l) => !l.added), null, state.pickContext ?? {}).lock?.path ?? null);
   const caveats = [

@@ -699,6 +699,11 @@ test("shareText never reads as fully clean when a private index's packages weren
   // No private packages: the line is unchanged, ✓ and all.
   assert.equal(shareText("owner/name", clean, ["3.14"], ["linux-x86_64"], url, 0), shareText("owner/name", clean, ["3.14"], ["linux-x86_64"], url));
   assert.match(shareText("owner/name", clean, ["3.14"], ["linux-x86_64"], url), /^✓ /);
+  // A single package with a gap reads as one dependency, agreeing with verdictText.
+  assert.equal(
+    shareText("owner/name", { gaps: 1, unknown: 0, packages: 1, targets: 1 }, ["3.14"], ["linux-x86_64"], url),
+    `owner/name: 1 of 1 dependency has no wheel on 1 target (checked with wheelgap) ${url}`,
+  );
 });
 
 test("next steps offer what isn't picked yet, as whole selections", () => {

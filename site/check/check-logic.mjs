@@ -705,8 +705,9 @@ export function shareText(repoName, h, pythons, platforms, url, notChecked = 0) 
     return `${notChecked || h.unknownTargets ? "" : "✓ "}${repoName}: ${notChecked ? deps.replace(/ (has|have)$/, " checked $1") : deps} a wheel ${where}${tail}`;
   }
   const verb = h.gaps === 1 ? "has" : "have";
+  const noun = h.packages === 1 ? "dependency" : "dependencies";
   const where = h.targets === 1 ? "1 target" : `at least one of ${h.targets} targets`;
-  return `${repoName}: ${h.gaps} of ${h.packages} dependencies ${verb} no wheel on ${where}${tail}`;
+  return `${repoName}: ${h.gaps} of ${h.packages} ${noun} ${verb} no wheel on ${where}${tail}`;
 }
 
 // "Ready for what's next?" shortcuts: the platforms and Pythons people most often move to, that aren't picked yet.
