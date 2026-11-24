@@ -291,7 +291,8 @@ def test_uv_lock_without_supported_markers_still_counts_every_platform(repo, pre
     assert r["rows"][0]["gaps"] == ["3.13 win-amd64"]
 
 
-def test_uv_environments_can_leave_out_every_target(repo):
+def test_uv_environments_can_leave_out_every_target(repo, monkeypatch):
+    monkeypatch.setattr(driver.api, "_check_lockfile", lambda *a, **kw: pytest.fail("no covered target to check"))
     (repo / "uv.lock").write_text('supported-markers = ["sys_platform == \'linux\'"]\n' + LOCK, encoding="utf-8")
     r = json.loads(driver.check(str(repo), "uv.lock", options(platforms=["win-amd64"])))
     assert r["outside_environments"] == ["3.13 win-amd64"]
@@ -339,7 +340,8 @@ def test_uv_environments_leave_undecidable_targets_unknown(repo, marker):
     assert [t.label(True) for t in driver._last_check[1]] == ["3.13 linux-x86_64", "3.13 linux-aarch64"]
 
 
-def test_uv_environments_can_leave_every_target_undecided(repo):
+def test_uv_environments_can_leave_every_target_undecided(repo, monkeypatch):
+    monkeypatch.setattr(driver.api, "_check_lockfile", lambda *a, **kw: pytest.fail("no covered target to check"))
     (repo / "uv.lock").write_text('supported-markers = ["platform_release == \'unknown\'"]\n' + LOCK, encoding="utf-8")
     r = json.loads(driver.check(str(repo), "uv.lock", options(platforms=["linux-x86_64", "win-amd64"])))
     assert set(r["unknown_environments"]) == {"3.13 linux-x86_64", "3.13 win-amd64"}
@@ -357,6 +359,40 @@ def test_uv_environments_distinguish_a_false_condition_from_an_unknown_one(repo)
     assert r["outside_environments"] == ["3.13 win-amd64"]
     assert all(not any(counts.values()) for counts in r["per_target"].values())
     assert r["rows"] == [] and driver._last_check[1] == []
+
+
+def test_uv_environments_pass_only_covered_targets_to_the_check(repo, monkeypatch):
+    markers = [
+        "python_version == '3.13' and sys_platform == 'linux'",
+        "python_version == '3.14' and platform_release == 'unknown'",
+    ]
+    (repo / "uv.lock").write_text(f"supported-markers = {json.dumps(markers)}\n" + LOCK, encoding="utf-8")
+    check_lockfile = driver.api._check_lockfile
+    checked = []
+
+    def check_covered(path, targets, **kwargs):
+        checked.extend(t.label(True) for t in targets)
+        return check_lockfile(path, targets, **kwargs)
+
+    monkeypatch.setattr(driver.api, "_check_lockfile", check_covered)
+    r = json.loads(driver.check(str(repo), "uv.lock", options(pythons=["3.13", "3.14"], platforms=["linux-x86_64", "win-amd64"])))
+    assert checked == ["3.13 linux-x86_64"]
+    assert r["outside_environments"] == ["3.13 win-amd64"]
+    assert set(r["unknown_environments"]) == {"3.14 linux-x86_64", "3.14 win-amd64"}
+    assert r["per_target"]["3.13 linux-x86_64"]["wheel"] == 2
+    assert r["packages"] == 2
+
+
+def test_uv_environment_unknown_keeps_the_locks_python_exclusion(repo):
+    marker = "python_version == '3.13' or platform_release == 'unknown'"
+    lock = LOCK.replace('">=3.13"', '">=3.13, <3.14"')
+    (repo / "uv.lock").write_text(f"supported-markers = {json.dumps([marker])}\n" + lock, encoding="utf-8")
+    r = json.loads(driver.check(str(repo), "uv.lock", options(pythons=["3.13", "3.14"], platforms=["linux-x86_64"])))
+    assert r["outside_lock"] == ["3.14"]
+    assert r["outside_environments"] == [] and r["unknown_environments"] == {}
+    assert r["per_target"]["3.13 linux-x86_64"]["wheel"] == 2
+    assert r["per_target"]["3.14 linux-x86_64"] == {"wheel": 0, "source": 0, "missing": 0, "unknown": 0}
+    assert [t.label(True) for t in driver._last_check[1]] == ["3.13 linux-x86_64"]
 
 
 def test_uv_environments_are_checked_per_python_and_platform(repo):
@@ -408,7 +444,7 @@ def test_offline_follows_the_reader_not_the_exact_name():
         "uv.lock": True, "a/pylock.toml": True, "poetry.lock": True, "pdm.lock": True, "pylock.dev.toml": True,
         "uv-py312.lock": True, "Pipfile.lock": False, "pixi.lock": False, "pyproject.toml": False,
         "requirements.txt": False, "requirements-dev.lock": False, "requirements.uv.lock": False, "dev.in": False,
-        "script.py.lock": False, "README.md": False,
+        "script.py.lock": True, "requirements.py.lock": True, "README.md": False,
     }
     assert {p: driver._reads_offline(p) for p in offline} == offline
 
@@ -496,7 +532,9 @@ def test_fixes_reports_a_release_that_only_trades_one_gap_for_another(repo):
     "case", ["match", "version", "target", "private", "malformed", "requires_python"]
 )
 def test_gap_wheels_reuse_cli_checks(repo, case):
-    gapwheels = pytest.importorskip("wheelgap.gapwheels")
+    # Imported, not importorskip'd: the pinned release has --fix, and a pin without it must fail here.
+    from wheelgap import gapwheels
+
     lockfile = repo / "uv.lock"
     entry = {
         "name": "fastlib",
@@ -533,9 +571,51 @@ def test_gap_wheels_reuse_cli_checks(repo, case):
         assert "[[tool.uv.index]]" in result["text"]
         assert "fastlib" in result["text"]
         assert result["unofficial"] == gapwheels.UNOFFICIAL
+        # No fixes() for this check: no upgrade, so the gap wheel isn't a fallback.
+        assert result["upgrades"] is False and [cell["fallback"] for cell in result["cells"]] == [False]
+        assert result["text"].startswith(gapwheels.HEAD)
     else:
-        assert result == {"cells": [], "text": "", "unofficial": ""}
+        assert result == {"cells": [], "text": "", "unofficial": "", "upgrades": False}
 
+
+
+@pytest.mark.parametrize("upgrade", [True, False])
+def test_gap_wheels_come_after_the_upgrade_fixes_found(repo, upgrade):
+    # wheelgap 0.14.0's --fix leads with an upgrade to an official release; a gap wheel for a cell an upgrade fixes
+    # too is the fallback ("if you can't upgrade"), and the section says so. The page follows it once fixes() ran.
+    from wheelgap import gapwheels
+
+    entry = {
+        "name": "fastlib",
+        "version": "2.0.0",
+        "wheel": "fastlib-2.0.0-cp313-cp313-win_amd64.whl",
+        "sha256": "a" * 64,
+        "requires_python": ">=3.13",
+    }
+    r = json.loads(driver.check(str(repo), "uv.lock", json.dumps({"pythons": ["3.13"], "platforms": ["win-amd64"]})))
+    newer = [wheel("fastlib-2.1.0-cp313-cp313-win_amd64.whl")] if upgrade else []
+    releases = {"fastlib": {"2.0.0": [wheel("fastlib-2.0.0.tar.gz")], "2.1.0": [wheel("fastlib-2.1.0.tar.gz"), *newer]}}
+    fx = json.loads(driver.fixes(json.dumps(releases), json.dumps(r["rows"])))
+    assert fx["fastlib==2.0.0"]["found"] == ({"3.13 win-amd64": "2.1.0"} if upgrade else {})
+    result = json.loads(driver.gap_wheels(json.dumps({"schema": gapwheels.SCHEMA, "wheels": [entry]})))
+    assert result["upgrades"] is upgrade
+    assert [(c["name"], c["target"], c["fallback"]) for c in result["cells"]] == [("fastlib", "3.13 win-amd64", upgrade)]
+    assert result["text"].startswith(gapwheels.FALLBACK_HEAD if upgrade else gapwheels.HEAD)
+    assert ("fastlib 2.0.0: 3.13 win-amd64 (if you can't upgrade fastlib)" in result["text"]) is upgrade
+    # A new check forgets the last one's upgrades.
+    driver.check(str(repo), "uv.lock", json.dumps({"pythons": ["3.13"], "platforms": ["win-amd64"]}))
+    again = json.loads(driver.gap_wheels(json.dumps({"schema": gapwheels.SCHEMA, "wheels": [entry]})))
+    assert again["upgrades"] is False and again["text"].startswith(gapwheels.HEAD)
+
+
+def test_the_mirrored_rules_are_the_pinned_wheelgaps():
+    # check-logic.mjs can't call wheelgap, so it copies these from the release worker.mjs pins: they must match it.
+    logic = (SITE / "check-logic.mjs").read_text(encoding="utf-8")
+    words = re.search(r"^const SIDE_WORDS = new Set\(\[(.*?)\]\);$", logic, re.M | re.S)
+    assert words and set(re.findall(r'"([^"]+)"', words.group(1))) == set(sources._SIDE_WORDS)
+    depth = re.search(r"^export const NESTED_DEPTH = (\d+);$", logic, re.M)
+    assert depth and int(depth.group(1)) == sources.NESTED_DEPTH
+    assert driver._NOT_REQUIREMENTS == sources._NOT_REQUIREMENTS
 
 def test_plan_lists_a_pyproject_after_the_lockfiles_in_its_folder():
     plan = json.loads(driver.plan(json.dumps(["pyproject.toml", "uv.lock", "sub/pyproject.toml", "sub/uv.lock"])))
@@ -958,9 +1038,15 @@ def test_the_settings_files_are_the_ones_the_pinned_wheelgap_reads():
     # Read from the input's folder and every folder above it, up to the first with a .git: what configs_for() names.
     walk = inspect.getsource(sources._nearby_config_names_an_index)
     assert "for directory in (folder, *folder.parents):" in walk and '(directory / ".git").exists()' in walk
-    callers = {
-        kind for kind, read in sources.READERS.items() if "_nearby_config_names_an_index" in inspect.getsource(read)
-    }
+    # The readers that call it, directly or through another function of sources.py (parse_requirements and
+    # _project_source do, since 0.14.0).
+    funcs = {n: f for n, f in vars(sources).items() if inspect.isfunction(f) and f.__module__ == sources.__name__}
+    reach = {"_nearby_config_names_an_index"}
+    while more := {
+        n for n, f in funcs.items() if n not in reach and any(re.search(rf"\b{r}\(", inspect.getsource(f)) for r in reach)
+    }:
+        reach |= more
+    callers = {kind for kind, read in sources.READERS.items() if read.__name__ in reach}
     assert callers == set(driver.NEARBY_CONFIG_READERS)
     # The worker drops the ones another check fetched by the same names.
     names = re.search(r"^const CONFIG_NAMES = (\[.*\]);$", (SITE / "worker.mjs").read_text(encoding="utf-8"), re.M)
@@ -1053,6 +1139,18 @@ def test_needs_names_a_missing_include_and_works_once_its_fetched(tmp_path):
         "fastlib",
         "numpy",
     ]
+
+
+def test_needs_names_a_missing_include_under_a_root_reached_through_a_link(tmp_path):
+    # wheelgap makes an include's path absolute without following links, so a root whose own path has one (macOS's
+    # /var -> /private/var) must still contain it: compared with Path.resolve(), it never would.
+    real = tmp_path / "real"
+    real.mkdir()
+    (tmp_path / "link").symlink_to(real, target_is_directory=True)
+    root = tmp_path / "link"
+    (real / "requirements.txt").write_text("-r sub/dev.txt\nnumpy==2.3.4\n", encoding="utf-8")
+    n = json.loads(driver.needs(str(root), "requirements.txt", configs(root)))
+    assert n == {"error": "sub/dev.txt (an include) isn't fetched yet", "kind": "include", "path": "sub/dev.txt"}
 
 
 def test_needs_refuses_an_include_outside_the_repo(tmp_path):
@@ -1305,6 +1403,31 @@ def test_trimmed_recorded_json_keeps_check_and_fixes_answers(tmp_path, requireme
     else:
         assert fixes == {"numpy==2.5.5": {"found": {}, "loses": []}}
 
+
+@pytest.mark.parametrize("case", ["hash", "exclude-newer"])
+def test_trimming_keeps_the_hashes_and_upload_times_wheelgap_reads(tmp_path, case):
+    # Since 0.14.0, a requirement's --hash options keep only the files whose digests.sha256 they list, and a uv
+    # exclude-newer drops the files uploaded after it (upload_time_iso_8601): the trimmed JSON must keep both.
+    project = recorded_project()
+    if case == "hash":
+        sha = project["releases"]["2.3.4"][0]["digests"]["sha256"]
+        lockfile, text = "requirements.txt", f"numpy==2.3.4 --hash=sha256:{sha}\n"
+        docs = {"numpy==2.3.4": {"info": project["info"], "urls": project["releases"]["2.3.4"]}}
+    else:
+        lockfile = "pyproject.toml"
+        text = '[project]\nname = "demo"\nversion = "0.1"\ndependencies = ["numpy>=2.3"]\n\n[tool.uv]\nexclude-newer = "2025-11-01T00:00:00Z"\n'
+        docs = {"numpy": project}
+    (tmp_path / lockfile).write_text(text, encoding="utf-8")
+    full, trimmed = (
+        json.loads(driver.check(str(tmp_path), lockfile, options(), json.dumps(d), configs(tmp_path)))
+        for d in (docs, trim_json(docs))
+    )
+    assert full == trimmed
+    [row] = trimmed["rows"]
+    if case == "hash":  # the listed hash is the x86_64 wheel's: the sdist's isn't, so the others are gaps
+        assert (row["version"], row["keep"], row["lookup"]) == ("2.3.4", ["3.13 linux-x86_64"], True)
+    else:  # 2.3.4 is the newest release uploaded before the cutoff
+        assert row["version"] == "2.3.4"
 
 @pytest.mark.parametrize("requirement", ["fastlib==1.0", "fastlib>=1", "fastlib"])
 def test_trimming_preserves_yanks_python_constraints_and_invalid_releases(tmp_path, requirement):
