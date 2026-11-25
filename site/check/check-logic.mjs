@@ -726,7 +726,9 @@ export function verdictText(h, notChecked = 0) {
   if (h.packages === 0) return `No packages were checked${environments}`;
   const tail = notCheckedTail(notChecked) + environments;
   const checked = notChecked ? "checked " : "";
-  const where = h.targets === 1 ? "this target" : h.targets === 2 ? "both targets" : `all ${h.targets} targets`;
+  // "both" only when nothing else was picked: next to "1 target couldn't be checked" it would miscount.
+  const two = h.unknownTargets ? "the 2 checked targets" : "both targets";
+  const where = h.targets === 1 ? "this target" : h.targets === 2 ? two : `all ${h.targets} targets`;
   if (h.gaps === 0 && h.unknown) {
     // "1 of 3 couldn't be checked", not "1 of 3 checked packages couldn't be checked", which contradicts itself.
     return `No package is missing a wheel, but ${h.unknown} of ${h.packages} couldn't be checked on ${h.targets === 1 ? "this target" : "some targets"}${tail}`;

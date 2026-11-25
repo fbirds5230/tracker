@@ -684,6 +684,13 @@ for (const [targets, where] of [[1, "this target"], [2, "both targets"], [3, "al
   }
 }
 
+test("two checked targets beside an undecided one aren't called both", () => {
+  assert.equal(
+    verdictText({ gaps: 0, unknown: 0, packages: 3, targets: 2, unknownTargets: 1 }),
+    "All 3 packages have a wheel for the 2 checked targets; 1 target couldn't be checked (the lock's environments don't say whether it is covered)",
+  );
+});
+
 test("the verdict counts checked and unchecked packages without claiming a complete pass", () => {
   const cases = [
     [1, 0, "✓ 1 package has a wheel for this target"],
