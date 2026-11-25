@@ -673,6 +673,17 @@ test("the verdict reads right for one target and many", () => {
   assert.equal(verdictText({ gaps: 0, unknown: 0, packages: 0, targets: 4 }), "No packages were checked");
 });
 
+for (const [targets, where] of [[1, "this target"], [2, "both targets"], [3, "all 3 targets"]]) {
+  for (const notChecked of [0, 2]) {
+    test(`the clean verdict names ${targets} targets with ${notChecked} unchecked packages`, () => {
+      const expected = notChecked
+        ? `All 3 checked packages have a wheel for ${where}; 2 more weren't checked (their index isn't known to be PyPI)`
+        : `✓ All 3 packages have a wheel for ${where}`;
+      assert.equal(verdictText({ gaps: 0, unknown: 0, packages: 3, targets }, notChecked), expected);
+    });
+  }
+}
+
 test("the verdict counts checked and unchecked packages without claiming a complete pass", () => {
   const cases = [
     [1, 0, "✓ 1 package has a wheel for this target"],
