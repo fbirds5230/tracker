@@ -482,12 +482,12 @@ const result = {
 test("rowsFor lists one Python's gaps, most first; headline counts distinct packages on counted targets", () => {
   assert.deepEqual(rowsFor(result, "3.14").map((r) => [r.name, r.here.length]), [["b", 2], ["a", 1]]);
   assert.deepEqual(rowsFor(result, "3.15"), []); // outside the lock: check() reports no gaps there
-  assert.deepEqual(headline(result), { gaps: 2, unknown: 0, packages: 10, targets: 2, unknownTargets: 0 });
+  assert.deepEqual(headline(result), { gaps: 2, unknown: 0, packages: 10, targets: 2, unknownTargets: 0, picked: 3 });
 });
 
 test("headline leaves targets outside uv environments out of the counted total", () => {
   const excluded = { ...result, outside_environments: ["3.14 win-arm64"], rows: [] };
-  assert.deepEqual(headline(excluded), { gaps: 0, unknown: 0, packages: 10, targets: 1, unknownTargets: 0 });
+  assert.deepEqual(headline(excluded), { gaps: 0, unknown: 0, packages: 10, targets: 1, unknownTargets: 0, picked: 3 });
   const none = { ...excluded, outside_environments: ["3.14 win-arm64", "3.14 linux-x86_64"] };
   assert.equal(headline(none).targets, 0);
   assert.match(shareText("o/r", headline(none), [], [], "https://example.com"), /lockfile leaves out every target picked/);
@@ -499,7 +499,7 @@ test("undecided uv environments are unknown targets in the verdict and copied re
     unknown_environments: { "3.14 win-arm64": "the lock's environments don't say whether this target is covered" },
   };
   const h = headline(undecided);
-  assert.deepEqual(h, { gaps: 0, unknown: 0, packages: 10, targets: 1, unknownTargets: 1 });
+  assert.deepEqual(h, { gaps: 0, unknown: 0, packages: 10, targets: 1, unknownTargets: 1, picked: 3 });
   for (const summary of [h, { ...h, targets: 0, packages: 0 }, { ...h, gaps: 2 }, { ...h, unknown: 1 }]) {
     const verdict = verdictText(summary);
     const copied = shareText("o/r", summary, ["3.14"], ["linux-x86_64"], "https://example.com");
@@ -522,6 +522,20 @@ test("the shared clean result doesn't imply excluded Python/platform pairs were 
   };
   const text = shareText("o/r", headline(diagonal), ["3.13", "3.14"], ["linux-x86_64", "win-amd64"], "https://example.com");
   assert.equal(text, "✓ o/r: all 10 dependencies have a wheel for the 2 checked targets (checked with wheelgap) https://example.com");
+});
+
+test("two counted targets out of more picked aren't called both", () => {
+  // 3.15 is outside the lock's requires-python, so 2 of the 3 picked targets are counted.
+  assert.equal(verdictText(headline({ ...result, rows: [] })), "✓ All 10 packages have a wheel for the 2 checked targets");
+  const diagonal = {
+    ...result, outside_lock: [], rows: [],
+    targets: ["3.13", "3.14"].flatMap((python) => ["linux-x86_64", "win-amd64"]
+      .map((platform) => ({ label: `${python} ${platform}`, python, platform }))),
+    outside_environments: ["3.13 win-amd64", "3.14 linux-x86_64"],
+  };
+  assert.equal(verdictText(headline(diagonal)), "✓ All 10 packages have a wheel for the 2 checked targets");
+  const both = { ...diagonal, targets: diagonal.targets.slice(0, 2), outside_environments: [] };
+  assert.equal(verdictText(headline(both)), "✓ All 10 packages have a wheel for both targets");
 });
 
 test("the CLI command and the fix prompt reproduce the check", () => {
@@ -829,7 +843,7 @@ test("unknown cells are listed but not counted as missing a wheel", () => {
     outside_lock: [],
     rows: [row("u", "1", [], { "3.14 linux-x86_64": "unknown", "3.14 win-arm64": "wheel" }, { unknown: ["3.14 linux-x86_64"] })],
   };
-  assert.deepEqual(headline(res), { gaps: 0, unknown: 1, packages: 10, targets: 3, unknownTargets: 0 });
+  assert.deepEqual(headline(res), { gaps: 0, unknown: 1, packages: 10, targets: 3, unknownTargets: 0, picked: 3 });
   assert.deepEqual(rowsFor(res, "3.14").map((r) => r.name), ["u"]);
   assert.equal(verdictText(headline(res)), "No package is missing a wheel, but 1 of 10 couldn't be checked on some targets");
 });

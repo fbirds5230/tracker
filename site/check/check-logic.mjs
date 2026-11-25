@@ -468,13 +468,14 @@ export function rowsFor(result, python) {
 }
 
 // The headline numbers: distinct packages with no wheel somewhere (gaps), distinct packages that couldn't be checked
-// somewhere and have no gap (unknown), out of how many, on how many counted targets.
+// somewhere and have no gap (unknown), out of how many, on how many counted targets (of how many picked).
 export function headline(result) {
   const gaps = new Set(result.rows.filter((r) => r.gaps.length).map((r) => r.name));
   const unknown = new Set(result.rows.filter((r) => (r.unknown || []).length && !gaps.has(r.name)).map((r) => r.name));
   const included = result.targets.filter((t) => !targetOutsideLock(result, t));
   const unknownTargets = included.filter((t) => result.unknown_environments?.[t.label]).length;
-  return { gaps: gaps.size, unknown: unknown.size, packages: result.packages, targets: included.length - unknownTargets, unknownTargets };
+  return { gaps: gaps.size, unknown: unknown.size, packages: result.packages, targets: included.length - unknownTargets, unknownTargets,
+    picked: result.targets.length };
 }
 
 function cliTargets(result, pythons, platforms) {
@@ -726,8 +727,10 @@ export function verdictText(h, notChecked = 0) {
   if (h.packages === 0) return `No packages were checked${environments}`;
   const tail = notCheckedTail(notChecked) + environments;
   const checked = notChecked ? "checked " : "";
-  // "both" only when nothing else was picked: next to "1 target couldn't be checked" it would miscount.
-  const two = h.unknownTargets ? "the 2 checked targets" : "both targets";
+  // "both" only when nothing else was picked: next to "1 target couldn't be checked", or with a picked target outside
+  // the lock or its environments, it would miscount.
+  const picked = h.picked ?? h.targets + (h.unknownTargets || 0);
+  const two = picked === 2 ? "both targets" : "the 2 checked targets";
   const where = h.targets === 1 ? "this target" : h.targets === 2 ? two : `all ${h.targets} targets`;
   if (h.gaps === 0 && h.unknown) {
     // "1 of 3 couldn't be checked", not "1 of 3 checked packages couldn't be checked", which contradicts itself.
