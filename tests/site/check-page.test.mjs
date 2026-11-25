@@ -850,13 +850,13 @@ test("with several requirements files under other names and nothing else, the pa
     "state", "$", "el", "status", "packageCliCommand", "renderSetup", "hideResultSections", "history", "toQuery", `${chooseSrc}; return chooseFile;`,
   )(st, box, (tag, attrs = {}, ...kids) => ({ tag, attrs, kids }), () => {}, checkLogic.packageCliCommand, () => {}, () => {}, { replaceState() {} }, checkLogic.toQuery);
   const files = [{ path: "requirements/base.txt" }, { path: "requirements/docs.txt" }];
-  chooseWith({ repo: { owner: "o", name: "r" }, fileNotice: "README.md isn't a file this page reads.", projectName: "httpie", pythons: ["3.14"], platforms: ["linux-x86_64"] })(files);
+  chooseWith({ repo: { owner: "o", name: "r" }, plan: { lockfiles: files }, fileNotice: "README.md isn't a file this page reads.", projectName: "httpie", pythons: ["3.14"], platforms: ["linux-x86_64"] })(files);
   const alerts = box("alerts").children;
   assert.equal(alerts.length, 2);
   assert.deepEqual(alerts[0], { tag: "p", attrs: { class: "alert warn", text: "README.md isn't a file this page reads. Pick a file to check instead." }, kids: [] });
   assert.equal(alerts[1].kids[0], "Or check the published package httpie's dependencies: ");
   assert.deepEqual(alerts[1].kids[1], { tag: "code", attrs: { text: "uvx wheelgap --deps httpie -p 3.14 -t linux-x86_64" }, kids: [] });
-  chooseWith({ repo: { owner: "o", name: "r" }, fileNotice: null, projectName: null, pythons: ["3.14"], platforms: ["linux-x86_64"] })(files);
+  chooseWith({ repo: { owner: "o", name: "r" }, plan: { lockfiles: files }, fileNotice: null, projectName: null, pythons: ["3.14"], platforms: ["linux-x86_64"] })(files);
   assert.deepEqual(box("alerts").children, []);
   // Requirements files under other names in the root come before the subfolders, as in `wheelgap DIR`: several of
   // them are asked about, never passed over for a subfolder's lockfile (#238).
@@ -912,12 +912,42 @@ function resultPage(locks, query = null, { dir = null, rootProjectFiles = [], un
     worker: { postMessage: (m) => posts.push(m) }, history: { replaceState: (data, title, url) => urls.push(url) },
     status() {}, loadLab() {}, keepFocus: (fn) => fn(), renderTargets() {}, renderTable() {}, renderNext() {},
   };
-  const functions = ["el", "chip", "onLoaded", "runCheck", "onResult", "render", "notCheckedCount", "renderVerdict", "renderSetup", "hideResultSections", "chooseFile"];
+  const functions = ["el", "chip", "onLoaded", "runCheck", "onResult", "render", "notCheckedCount", "renderVerdict", "renderSetup", "hideResultSections", "chooseFile", "noLockfile"];
   const page = new Function(...Object.keys(env), `let seq = 0; ${functions.map(fn).join("\n")}; return {onLoaded, onResult};`)(...Object.values(env));
   page.onLoaded({ plan: { lockfiles: locks, workflows: [], root_project_files: rootProjectFiles, unlisted_inputs: unlistedInputs },
     detected: { found: [], unreadable: [], pythons: ["3.14"], platforms: ["linux-x86_64"] }, ref: "HEAD", root: "/repos/1" });
   return { ...page, $, state, posts, urls };
 }
+
+test("a repo with no listed or unlisted input still says no lockfile was found", () => {
+  const page = resultPage([]);
+  assert.equal(page.$("verdict").textContent, "No lockfile found");
+  assert.equal(page.posts.length, 0);
+});
+
+for (const [label, locks] of [
+  ["alone", []],
+  ["beside prod-requirements.txt", [{ path: "prod-requirements.txt", offline: false, other: true }]],
+]) test(`an input in dist/ ${label} is offered in the actual picker`, () => {
+  const page = resultPage([...locks], null, { unlistedInputs: ["dist/requirements.txt"] });
+  assert.equal(page.$("verdict").textContent, "Pick the file to check");
+  assert.match(page.$("verdict-detail").textContent, /but inputs in its subfolders.*dist\/requirements\.txt/);
+  assert.doesNotMatch(page.$("verdict-detail").textContent, /has no input.*up to 3 down/);
+  assert.equal(page.state.lockfile, null);
+  assert.equal(page.posts.length, 0, "the unlisted file waits for the visitor's choice");
+  assert.equal(page.$("lock-pick").hidden, false);
+  assert.deepEqual(page.$("lockfile").children.map((o) => o.value), ["", ...locks.map((l) => l.path), "dist/requirements.txt"]);
+  assert.deepEqual(page.state.plan.lockfiles.at(-1), { path: "dist/requirements.txt", offline: false, added: true });
+  page.$("lockfile").value = "dist/requirements.txt";
+  page.$("lockfile").onchange();
+  assert.deepEqual(page.posts.map((m) => m.lockfile), ["dist/requirements.txt"]);
+  assert.equal(page.state.auto, false);
+});
+
+test("a chooser offering one side input says to check it anyway", () => {
+  const page = resultPage([{ path: "docs/requirements.txt", offline: false }]);
+  assert.match(page.$("verdict-detail").textContent, /To check it anyway, pick it under "Lockfile" below\./);
+});
 
 const privateResult = {
   wheelgap: "0.13.0", lockfile: "pyproject.toml", looked_up: true, listed: 3, packages: 0, private_count: 3,
@@ -1036,7 +1066,7 @@ test("after the root pyproject.toml, a repo shaped like transformers shows the c
   today.onResult({ ...noProjectTable, project: false });
   assert.deepEqual(today.posts.map((m) => m.lockfile), ["pyproject.toml"]);
   assert.equal(today.$("verdict-detail").textContent,
-    "example/project has no input that wheelgap reads by itself at its root or in a folder up to 3 down, only utils/checkers-requirements.txt. To check one anyway, pick it under \"Lockfile\" below.");
+    "example/project has no input that wheelgap reads by itself at its root or in a folder up to 3 down, only utils/checkers-requirements.txt. To check it anyway, pick it under \"Lockfile\" below.");
   // Without the setup.py, and with a non-side folder instead, the root still isn't a project unless the driver says so.
   const locks = [{ path: "pyproject.toml", offline: false }, { path: "app/requirements.txt", offline: false }];
   const settings = resultPage([...locks]);
@@ -1050,6 +1080,20 @@ test("after the root pyproject.toml, a repo shaped like transformers shows the c
   empty.onResult({ ...privateResult, listed: 0, private_count: 0, private: [], skipped: [] }); // [project] lists nothing
   assert.deepEqual(empty.posts.map((m) => m.lockfile), ["pyproject.toml"]);
   assert.match(empty.$("verdict-detail").textContent, /\. Its pyproject\.toml lists no dependencies, so the one input in its subfolders, app\/requirements\.txt, isn't taken for the project's\./);
+});
+
+test("after an unreadable root pyproject, an unlisted input is added to the picker", () => {
+  const page = resultPage([
+    { path: "pyproject.toml", offline: false },
+    { path: "prod-requirements.txt", offline: false, other: true },
+  ], null, { unlistedInputs: ["dist/requirements.txt"] });
+  page.onResult({ ...noProjectTable, project: false });
+  assert.deepEqual(page.posts.map((m) => m.lockfile), ["pyproject.toml"]);
+  assert.match(page.$("verdict-detail").textContent, /but inputs in its subfolders.*dist\/requirements\.txt/);
+  assert.deepEqual(page.$("lockfile").children.map((o) => o.value), ["", "prod-requirements.txt", "dist/requirements.txt"]);
+  page.$("lockfile").value = "dist/requirements.txt";
+  page.$("lockfile").onchange();
+  assert.deepEqual(page.posts.map((m) => m.lockfile), ["pyproject.toml", "dist/requirements.txt"]);
 });
 
 test("the only input in a subfolder is checked, and the verdict says it came from a subfolder", () => {

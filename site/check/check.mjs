@@ -319,6 +319,10 @@ function showPackageFallback(packageName) {
 // doesn't), so it lists them, says why in `wheelgap DIR`'s words (`pick.why`), and the picker checks the one chosen.
 // Without a `why`, they're #229's requirements files under other names.
 function chooseFile(files, pick = {}) {
+  // Inputs known only by name (unlistedInputs) weren't in plan()'s list, which renderSetup() uses for the picker.
+  for (const file of files) {
+    if (!state.plan.lockfiles.some((l) => l.path === file.path)) state.plan.lockfiles.push(file);
+  }
   state.lockfile = null;
   // Drop the lock= of a file the page tried and moved on from: a reload or a shared link would check it as named.
   history.replaceState(null, "", `?${toQuery({ ...state, repo: { ...state.repo, ref: state.repo.ref } })}`);
@@ -328,6 +332,7 @@ function chooseFile(files, pick = {}) {
   $("out").hidden = false;
   const names = files.map((l) => l.path);
   const some = `${names.slice(0, 8).join(", ")}${names.length > 8 ? `, and ${names.length - 8} more` : ""}`;
+  const one = names.length === 1 ? "it" : "one";
   const repoName = `${state.repo.owner}/${state.repo.name}`;
   const atRoot = `${repoName} has no lockfile, requirements.txt or pyproject.toml dependencies at its root`;
   $("verdict").textContent = "Pick the file to check";
@@ -347,10 +352,10 @@ function chooseFile(files, pick = {}) {
       $("verdict-detail").textContent = `${atRoot}, and more than one file that could hold the project's dependencies: ${some}. Pick the one to check under "Lockfile" below.`;
       break;
     case "side":
-      $("verdict-detail").textContent = `${atRoot}, and the only inputs it has are, by their names, for development, tests, docs or examples, which wheelgap doesn't check on its own: ${some}. To check one anyway, pick it under "Lockfile" below.`;
+      $("verdict-detail").textContent = `${atRoot}, and the only inputs it has are, by their names, for development, tests, docs or examples, which wheelgap doesn't check on its own: ${some}. To check ${one} anyway, pick it under "Lockfile" below.`;
       break;
     case "elsewhere":
-      $("verdict-detail").textContent = `${repoName} has no input that wheelgap reads by itself at its root or in a folder up to ${NESTED_DEPTH} down, only ${some}. To check one anyway, pick it under "Lockfile" below.`;
+      $("verdict-detail").textContent = `${repoName} has no input that wheelgap reads by itself at its root or in a folder up to ${NESTED_DEPTH} down, only ${some}. To check ${one} anyway, pick it under "Lockfile" below.`;
       break;
     default:
       $("verdict-detail").textContent = names.length === 1

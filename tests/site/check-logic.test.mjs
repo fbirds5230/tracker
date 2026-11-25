@@ -330,6 +330,20 @@ test("autoPick never takes the one input it lists for the only one when wheelgap
   assert.deepEqual(autoPick([backend], null, { unlistedInputs: ["tests/requirements.txt", "examples/app/uv.lock"] }), { lock: backend, choose: null, why: "subfolder" });
 });
 
+test("autoPick offers non-side inputs that plan skipped when no listed input can be picked", () => {
+  const ctx = { unlistedInputs: ["dist/requirements.txt", "target/pylock.toml", "tests/requirements.txt"] };
+  const expected = { lock: null, choose: [
+    { path: "dist/requirements.txt", offline: false, added: true },
+    { path: "target/pylock.toml", offline: true, added: true },
+  ], why: "subfolders" };
+  assert.deepEqual(autoPick([], null, ctx), expected);
+  assert.deepEqual(autoPick([at("docs/uv.lock"), req("prod-requirements.txt")], null, ctx), expected);
+  // Listed root and explicit choices still come first; side-only unlisted inputs don't create a new choice.
+  assert.deepEqual(autoPick([at("uv.lock")], null, ctx), { lock: at("uv.lock"), choose: null });
+  assert.equal(pickRequestedFile([], "target/pylock.toml", true, null, ctx).lock.path, "target/pylock.toml");
+  assert.deepEqual(autoPick([], null, { unlistedInputs: ["tests/requirements.txt"] }), { lock: null, choose: null });
+});
+
 test("autoPick keeps root files first, and offers deeper files without picking one", () => {
   // A file at the root, or in the folder a link names, is picked as before, whatever is in the subfolders.
   const repo = [at("uv.lock"), at("Doc/pylock.toml"), at("libs/core/uv.lock"), at("libs/langchain/uv.lock")];

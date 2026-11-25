@@ -190,7 +190,8 @@ export function autoPick(lockfiles, dir, ctx = {}) {
     folders.add(folder);
     (isSideFile(l.path) ? side : main).push(l);
   }
-  const partial = ctx.partial || (ctx.unlistedInputs || []).some((p) => !isSideFile(p));
+  const unlisted = (ctx.unlistedInputs || []).filter((p) => !isSideFile(p));
+  const partial = ctx.partial || unlisted.length > 0;
   if (main.length === 1 && !partial) {
     const [only] = main;
     const project = rootProject(ctx);
@@ -204,6 +205,11 @@ export function autoPick(lockfiles, dir, ctx = {}) {
     return { lock: only, choose: null, why: "subfolder" };
   }
   if (main.length) return { lock: null, choose: main, why: "subfolders" };
+  // plan() skips these folders, but the worker can fetch a file there once the visitor chooses it.
+  if (unlisted.length) return {
+    lock: null, choose: unlisted.map((path) => ({ path, offline: OFFLINE_KINDS.includes(fileKind(path)), added: true })),
+    why: "subfolders",
+  };
   if (side.length) return { lock: null, choose: [...rootOthers, ...side], why: "side" };
   if (rootOthers.length) return { lock: null, choose: rootOthers }; // #229's lone side file in the root
   if (!lockfiles.length) return { lock: null, choose: null };
