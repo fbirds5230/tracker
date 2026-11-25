@@ -1492,3 +1492,99 @@ def test_the_result_counts_the_packages_a_file_lists(tmp_path):
     r = json.loads(driver.check(str(tmp_path), "pyproject.toml", options(), "{}", configs(tmp_path)))
     assert (r["listed"], r["packages"], r["skipped"], r["rows"]) == (1, 0, [], [])
     assert r["private_count"] == 0
+
+
+def test_pytorch_project_snapshot_is_canonical_sorted_and_unique():
+    names = driver.PYTORCH_PROJECTS
+    assert list(names) == sorted(set(names))
+    assert all(name == re.sub(r"[-_.]+", "-", name).lower() for name in names)
+    assert {"torch", "torchvision", "torchaudio", "numpy", "pillow", "triton"} <= set(names)
+    assert driver.PUBLIC_EXTRA_INDEXES["download.pytorch.org"] == frozenset(names)
+
+
+def test_pytorch_requirements_include_keeps_pypi_fixes_and_other_index_rows_unknown(tmp_path):
+    # Keras's shape: the CPU index is in requirements.txt and the common dependencies in an include.
+    (tmp_path / "requirements.txt").write_text(
+        "--extra-index-url https://download.pytorch.org/whl/cpu\n-r requirements-common.txt\n", encoding="utf-8"
+    )
+    versions = {"numpy": "1.26.4", "scipy": "1.14.1", "pillow": "11.0.0", "pyyaml": "6.0.3"}
+    (tmp_path / "requirements-common.txt").write_text(
+        "".join(f"{name}=={version}\n" for name, version in versions.items()), encoding="utf-8"
+    )
+    needed = json.loads(driver.needs(str(tmp_path), "requirements.txt", NO_CONFIGS))
+    assert needed["lookups"] == [{"name": "scipy", "version": "1.14.1"}, {"name": "pyyaml", "version": "6.0.3"}]
+    # Even supplied PyPI answers for numpy/pillow must be ignored: this file may install them from PyTorch.
+    lookups = {
+        f"{name}=={version}": {"info": {"version": version}, "urls": [{"filename": f"{name}-{version}.tar.gz"}]}
+        for name, version in versions.items()
+    }
+    result = json.loads(driver.check(
+        str(tmp_path), "requirements.txt", options(pythons=["3.15"], platforms=["linux-x86_64"]),
+        json.dumps(lookups), NO_CONFIGS,
+    ))
+    rows = {row["name"]: row for row in result["rows"]}
+    for name in ("numpy", "pillow"):
+        assert rows[name]["statuses"] == {"3.15 linux-x86_64": "unknown"}
+        assert rows[name]["reason"] == "may be installed from download.pytorch.org, which this page doesn't read"
+        assert rows[name]["lookup"] is False
+    for name in ("scipy", "pyyaml"):
+        assert rows[name]["statuses"] == {"3.15 linux-x86_64": "source"}
+        assert rows[name]["lookup"] is True
+        assert "reason" not in rows[name]
+    assert result["private"] == [] and result["extra_indexes"] == ["download.pytorch.org"]
+    assert driver._last_check[2].pypi_only is False  # eligibility must not rewrite the original Source
+    releases = {
+        "pyyaml": {"6.0.4": [wheel("pyyaml-6.0.4-cp315-cp315-manylinux_2_17_x86_64.whl")]},
+        "numpy": {"2.5.0": [wheel("numpy-2.5.0-cp315-cp315-manylinux_2_17_x86_64.whl")]},
+        "pillow": {"12.0.0": [wheel("pillow-12.0.0-cp315-cp315-manylinux_2_17_x86_64.whl")]},
+    }
+    assert json.loads(driver.fixes(json.dumps(releases), json.dumps(result["rows"]))) == {
+        "pyyaml==6.0.3": {"found": {"3.15 linux-x86_64": "6.0.4"}, "loses": []}
+    }
+
+
+def test_pytorch_pypi_range_fixes_follow_each_python_resolution(tmp_path):
+    (tmp_path / "requirements.txt").write_text(TORCH_LINE + "pyyaml>=6.0.3,<7\n", encoding="utf-8")
+    releases = {
+        "6.0.3": [{"filename": "pyyaml-6.0.3.tar.gz", "requires_python": ">=3.9"}],
+        "6.0.4": [{"filename": "pyyaml-6.0.4.tar.gz", "requires_python": ">=3.15"}],
+    }
+    result = json.loads(driver.check(
+        str(tmp_path), "requirements.txt", options(pythons=["3.13", "3.15"], platforms=["linux-x86_64"]),
+        json.dumps({"pyyaml": {"releases": releases}}), NO_CONFIGS,
+    ))
+    rows = {row["version"]: row for row in result["rows"]}
+    assert set(rows) == {"6.0.3", "6.0.4"}
+    assert rows["6.0.3"]["gaps"] == ["3.13 linux-x86_64"]
+    assert rows["6.0.4"]["gaps"] == ["3.15 linux-x86_64"]
+    assert all(row["lookup"] for row in rows.values())
+    releases["6.0.5"] = [wheel("pyyaml-6.0.5-py3-none-any.whl")]
+    assert json.loads(driver.fixes(json.dumps({"pyyaml": releases}), json.dumps(result["rows"]))) == {
+        "pyyaml==6.0.3": {"found": {"3.13 linux-x86_64": "6.0.5"}, "loses": []},
+        "pyyaml==6.0.4": {"found": {"3.15 linux-x86_64": "6.0.5"}, "loses": []},
+    }
+
+
+@pytest.mark.parametrize("answer", [None, {}, {"info": {"version": "6.0.3"}, "urls": "not a list"}])
+def test_pytorch_pypi_fixes_still_need_a_successful_lookup(tmp_path, answer):
+    (tmp_path / "requirements.txt").write_text(TORCH_LINE + "pyyaml==6.0.3\n", encoding="utf-8")
+    result = json.loads(driver.check(
+        str(tmp_path), "requirements.txt", options(), json.dumps({"pyyaml==6.0.3": answer}), NO_CONFIGS,
+    ))
+    assert result["rows"][0]["lookup"] is False
+    releases = {"pyyaml": {"6.0.4": [wheel("pyyaml-6.0.4-py3-none-any.whl")]}}
+    assert json.loads(driver.fixes(json.dumps(releases), json.dumps(result["rows"]))) == {}
+
+
+def test_pytorch_pypi_fixes_dont_override_a_same_named_direct_reference(tmp_path):
+    (tmp_path / "requirements.txt").write_text(
+        TORCH_LINE + "pyyaml==6.0.3\npyyaml @ https://example.invalid/pyyaml-6.0.3-py3-none-any.whl\n",
+        encoding="utf-8",
+    )
+    result = json.loads(driver.check(
+        str(tmp_path), "requirements.txt", options(),
+        json.dumps({"pyyaml==6.0.3": {"urls": [{"filename": "pyyaml-6.0.3.tar.gz"}]}}), NO_CONFIGS,
+    ))
+    assert result["rows"] and all(not row["lookup"] for row in result["rows"])
+    releases = {"pyyaml": {"6.0.4": [wheel("pyyaml-6.0.4-py3-none-any.whl")]}}
+    assert json.loads(driver.fixes(json.dumps(releases), json.dumps(result["rows"]))) == {}

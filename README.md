@@ -168,6 +168,34 @@ Package-page gap wheel hints use `gap-wheels.json` and the current `status.json`
 - `site/404.html` uses absolute `/tracker/` paths, so its styles load only under that prefix;
 - the lookup fetches the gap wheel list from `../wheels/data/gap-wheels.json`, which a local server doesn't have, so it shows no gap wheels.
 
+### PyTorch extra index snapshot
+
+For a plain requirements file whose only other index is `download.pytorch.org`, the repo checker leaves packages
+that PyTorch may serve as unknown. `PYTORCH_PROJECTS` in `site/check/driver.py` is a dated, canonical, sorted union
+of those project names. Other packages can be checked and offered fixes from PyPI. The browser uses only this
+static snapshot; it never fetches a PyTorch index.
+
+To refresh the snapshot, run this from the repository root and replace the `PYTORCH_PROJECTS` block, including
+its date, with the output:
+
+```sh
+python3 scripts/pytorch_projects.py
+```
+
+The script follows CPU, numbered CUDA, numbered ROCm, ROCm-preview and XPU channel links from
+<https://download.pytorch.org/whl/>. It also includes the still-readable historical `cpu-cxx11-abi` index. The root
+mixes channels with project names, so only those channel links are followed. Every selected index must download
+and parse successfully before the script prints anything; a failure aborts instead of producing a partial list.
+Its tests use local HTML fixtures and make no network requests.
+
+The root links `cpu-pypi-pkg`, `cu117-pypi-cudnn`, `cu121-pypi-cudnn`, `cu121-full`, `cu124-full`, `cu126-full` and
+`cu128-full` returned HTTP 403 when checked on 2026-11-25 and are excluded. PyTorch's
+[index publisher](https://github.com/pytorch/test-infra/blob/8cd319865066bf94e5be2b0180d081175095c980/s3_management/manage_v2.py)
+classifies their underlying underscore-named directories as legacy builds in `NOT_ACCEPTED_SUBDIR_PATTERNS` and
+excludes them when generating indices. The snapshot does not claim to cover the contents of those unreadable
+variants. Nightly, test and variant trees are outside this snapshot too; new channels or packages need a reviewed
+refresh.
+
 ### Tests
 
 The [Check](.github/workflows/check.yml) workflow runs these on every pull request; run the same before you open one:

@@ -20,6 +20,7 @@ from __future__ import annotations
 import json
 import os
 import re
+from dataclasses import replace
 from pathlib import Path, PurePosixPath
 
 import wheelgap
@@ -56,12 +57,184 @@ MAX_DOCKERFILES = 40
 CONFIG_NAMES = ("uv.toml", "pyproject.toml", "pdm.toml")
 NEARBY_CONFIG_READERS = ("requirements", "pyproject", "pipfile", "script", "conda-env")
 
+# Union of 56 public PyTorch channel indexes, retrieved 2026-11-25.
+# Regenerate with: python3 scripts/pytorch_projects.py (see README for scope and exclusions).
+PYTORCH_PROJECTS = (
+    "certifi",
+    "charset-normalizer",
+    "cmake",
+    "colorama",
+    "cuda-bindings",
+    "cuda-pathfinder",
+    "cuda-python",
+    "cuda-toolkit",
+    "cupti-python",
+    "dpcpp-cpp-rt",
+    "executorch",
+    "fbgemm-gpu",
+    "fbgemm-gpu-genai",
+    "filelock",
+    "flash-attn-3",
+    "flashinfer",
+    "flashinfer-python",
+    "fsspec",
+    "idna",
+    "impi-rt",
+    "importlib-metadata",
+    "intel-cmplr-lib-rt",
+    "intel-cmplr-lib-ur",
+    "intel-cmplr-lic-rt",
+    "intel-opencl-rt",
+    "intel-openmp",
+    "intel-pti",
+    "intel-sycl-rt",
+    "iopath",
+    "jinja2",
+    "lightning-utilities",
+    "lit",
+    "markupsafe",
+    "mkl",
+    "mpmath",
+    "mslk",
+    "mypy-extensions",
+    "networkx",
+    "numpy",
+    "nvidia-cublas",
+    "nvidia-cublas-cu11",
+    "nvidia-cublas-cu12",
+    "nvidia-cuda-cccl",
+    "nvidia-cuda-cccl-cu12",
+    "nvidia-cuda-cupti",
+    "nvidia-cuda-cupti-cu11",
+    "nvidia-cuda-cupti-cu12",
+    "nvidia-cuda-nvrtc",
+    "nvidia-cuda-nvrtc-cu11",
+    "nvidia-cuda-nvrtc-cu12",
+    "nvidia-cuda-runtime",
+    "nvidia-cuda-runtime-cu11",
+    "nvidia-cuda-runtime-cu12",
+    "nvidia-cudnn-cu11",
+    "nvidia-cudnn-cu12",
+    "nvidia-cudnn-cu13",
+    "nvidia-cufft",
+    "nvidia-cufft-cu11",
+    "nvidia-cufft-cu12",
+    "nvidia-cufile",
+    "nvidia-cufile-cu12",
+    "nvidia-curand",
+    "nvidia-curand-cu11",
+    "nvidia-curand-cu12",
+    "nvidia-cusolver",
+    "nvidia-cusolver-cu11",
+    "nvidia-cusolver-cu12",
+    "nvidia-cusparse",
+    "nvidia-cusparse-cu11",
+    "nvidia-cusparse-cu12",
+    "nvidia-cusparselt-cu12",
+    "nvidia-cusparselt-cu13",
+    "nvidia-nccl-cu11",
+    "nvidia-nccl-cu12",
+    "nvidia-nccl-cu13",
+    "nvidia-nvjitlink",
+    "nvidia-nvjitlink-cu12",
+    "nvidia-nvshmem-cu12",
+    "nvidia-nvshmem-cu13",
+    "nvidia-nvtx",
+    "nvidia-nvtx-cu11",
+    "nvidia-nvtx-cu12",
+    "oneccl",
+    "oneccl-devel",
+    "onemkl-license",
+    "onemkl-sycl-blas",
+    "onemkl-sycl-dft",
+    "onemkl-sycl-lapack",
+    "onemkl-sycl-rng",
+    "onemkl-sycl-sparse",
+    "packaging",
+    "pillow",
+    "portalocker",
+    "pyelftools",
+    "pyre-extensions",
+    "pytorch-triton",
+    "pytorch-triton-rocm",
+    "pytorch-triton-xpu",
+    "pyzes",
+    "requests",
+    "rocm",
+    "rocm-sdk-core",
+    "rocm-sdk-devel",
+    "rocm-sdk-device-gfx1010",
+    "rocm-sdk-device-gfx1011",
+    "rocm-sdk-device-gfx1012",
+    "rocm-sdk-device-gfx1030",
+    "rocm-sdk-device-gfx1031",
+    "rocm-sdk-device-gfx1032",
+    "rocm-sdk-device-gfx1033",
+    "rocm-sdk-device-gfx1034",
+    "rocm-sdk-device-gfx1035",
+    "rocm-sdk-device-gfx1036",
+    "rocm-sdk-device-gfx1100",
+    "rocm-sdk-device-gfx1101",
+    "rocm-sdk-device-gfx1102",
+    "rocm-sdk-device-gfx1103",
+    "rocm-sdk-device-gfx1150",
+    "rocm-sdk-device-gfx1151",
+    "rocm-sdk-device-gfx1152",
+    "rocm-sdk-device-gfx1153",
+    "rocm-sdk-device-gfx1200",
+    "rocm-sdk-device-gfx1201",
+    "rocm-sdk-device-gfx1250",
+    "rocm-sdk-device-gfx908",
+    "rocm-sdk-device-gfx90a",
+    "rocm-sdk-device-gfx942",
+    "rocm-sdk-device-gfx950",
+    "rocm-sdk-libraries",
+    "setuptools",
+    "spmd-types",
+    "sympy",
+    "tbb",
+    "tcmlib",
+    "torch",
+    "torch-cuda80",
+    "torch-model-archiver",
+    "torch-nightly",
+    "torch-tb-profiler",
+    "torch-tensorrt",
+    "torch-tensorrt-executorch-runtime",
+    "torch-tensorrt-rtx",
+    "torchao",
+    "torchaudio",
+    "torchcodec",
+    "torchcomms",
+    "torchcsprng",
+    "torchdata",
+    "torchdistx",
+    "torchmetrics",
+    "torchrec",
+    "torchrec-cpu",
+    "torchserve",
+    "torchtext",
+    "torchtune",
+    "torchvision",
+    "tqdm",
+    "triton",
+    "triton-rocm",
+    "triton-xpu",
+    "typing-extensions",
+    "typing-inspect",
+    "umf",
+    "urllib3",
+    "vllm",
+    "xformers",
+    "zipp",
+)
+
 # Public extra indexes: a requirements file whose only index options are an --extra-index-url to one of these is still
 # looked up on PyPI (pip asks PyPI for every name too, so none is private). Adding a host is a reviewed change; each
 # entry names who runs it and the packages that index may serve instead of PyPI's, which are shown as unknown.
 PUBLIC_EXTRA_INDEXES: dict[str, frozenset[str]] = {
-    # PyTorch Foundation (Linux Foundation): the official CUDA, ROCm and CPU wheels of PyTorch.
-    "download.pytorch.org": frozenset({"torch", "torchvision", "torchaudio"}),
+    # PyTorch Foundation (Linux Foundation): public PyTorch indexes and the other projects they serve.
+    "download.pytorch.org": frozenset(PYTORCH_PROJECTS),
 }
 # The one option line taken as public, whole: `--extra-index-url URL` or `--extra-index-url=URL`, nothing else on it,
 # the URL https on a lowercase host with a plain path: no user@, port, quote, ${VAR}, %, ?, # or backslash, which pip
@@ -615,12 +788,17 @@ def check(
     # --suggest's rule (origin.known_pypi): only packages positively from PyPI are looked up there, so a private
     # package's name never goes to pypi.org, and a same-named PyPI project is never offered as its fix. A package
     # resolved for each Python is judged by its resolutions, which the lookups mark, as origin.private_names() does.
-    private = origin.private_names([source])
+    # For a requirements file whose only other index passed _public_extra_hosts, the names absent from that
+    # index's snapshot can still be fixed on PyPI. The lookups above leave the other names unfilled. Let origin
+    # judge this view of the source: it still requires found_on_pypi and protects skipped/direct references and
+    # names also placed elsewhere. Keep the original source (including pypi_only) for _last_check and gap wheels.
+    pypi_source = replace(source, pypi_only=True) if extra_hosts else source
+    private = origin.private_names([pypi_source])
     on_pypi: dict[tuple[str, str | None], bool] = {}
     for original in source.packages:
         for p in original.resolutions.values() or (original,):
             key = (canonicalize_name(p.name), p.version)
-            on_pypi[key] = on_pypi.get(key, True) and origin.known_pypi(p, source, private=private)
+            on_pypi[key] = on_pypi.get(key, True) and origin.known_pypi(p, pypi_source, private=private)
     _targets.clear()
     _targets.update((t.label(True), t) for t in targets)
     uncounted = outside_environments | unknown_environments.keys()
