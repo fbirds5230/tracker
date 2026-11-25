@@ -771,18 +771,18 @@ export function shareText(repoName, h, pythons, platforms, url, notChecked = 0) 
     const where = h.targets === 1 ? "1 target" : "some targets";
     return `${repoName}: no dependency is missing a wheel, but ${h.unknown} of ${h.packages} couldn't be checked on ${where}${tail}`;
   }
+  const noun = `${notChecked > 0 ? "checked " : ""}${h.packages === 1 ? "dependency" : "dependencies"}`;
   if (h.gaps === 0) {
-    const deps = h.packages === 1 ? "1 dependency has" : `all ${h.packages} dependencies have`;
+    const deps = h.packages === 1 ? `1 ${noun} has` : `all ${h.packages} ${noun} have`;
     const pyList = sortPythons(pythons).join(", ");
     const plats = platforms.length === 1 ? "1 platform" : `${platforms.length} platforms`;
     // Environment markers can leave only some Python/platform pairs. Naming each axis would imply their full
     // cross product was checked (for example Linux on 3.13 and Windows on 3.14 doesn't check Windows on 3.13).
     const where = h.targets < pythons.length * platforms.length
       ? `for the ${h.targets} checked targets` : `on Python ${pyList} for ${plats}`;
-    return `${notChecked || h.unknownTargets ? "" : "✓ "}${repoName}: ${notChecked ? deps.replace(/ (has|have)$/, " checked $1") : deps} a wheel ${where}${tail}`;
+    return `${notChecked || h.unknownTargets ? "" : "✓ "}${repoName}: ${deps} a wheel ${where}${tail}`;
   }
   const verb = h.gaps === 1 ? "has" : "have";
-  const noun = h.packages === 1 ? "dependency" : "dependencies";
   const where = h.targets === 1 ? "1 target" : `at least one of ${h.targets} targets`;
   return `${repoName}: ${h.gaps} of ${h.packages} ${noun} ${verb} no wheel on ${where}${tail}`;
 }

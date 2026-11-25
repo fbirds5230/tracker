@@ -785,16 +785,16 @@ test("shareText never reads as fully clean when a private index's packages weren
   const line = shareText("owner/name", clean, ["3.14"], ["linux-x86_64", "win-amd64"], url, 5);
   assert.equal(
     line,
-    `owner/name: all 12 dependencies checked have a wheel on Python 3.14 for 2 platforms; 5 more weren't checked (their index isn't known to be PyPI) (checked with wheelgap) ${url}`,
+    `owner/name: all 12 checked dependencies have a wheel on Python 3.14 for 2 platforms; 5 more weren't checked (their index isn't known to be PyPI) (checked with wheelgap) ${url}`,
   );
   assert.ok(!line.includes("✓"));
   assert.equal(
     shareText("owner/name", { ...clean, packages: 1 }, ["3.14"], ["linux-x86_64"], url, 1),
-    `owner/name: 1 dependency checked has a wheel on Python 3.14 for 1 platform; 1 more wasn't checked (its index isn't known to be PyPI) (checked with wheelgap) ${url}`,
+    `owner/name: 1 checked dependency has a wheel on Python 3.14 for 1 platform; 1 more wasn't checked (its index isn't known to be PyPI) (checked with wheelgap) ${url}`,
   );
   assert.equal(
     shareText("owner/name", { ...clean, gaps: 2 }, ["3.14"], ["linux-x86_64"], url, 3),
-    `owner/name: 2 of 12 dependencies have no wheel on at least one of 2 targets; 3 more weren't checked (their index isn't known to be PyPI) (checked with wheelgap) ${url}`,
+    `owner/name: 2 of 12 checked dependencies have no wheel on at least one of 2 targets; 3 more weren't checked (their index isn't known to be PyPI) (checked with wheelgap) ${url}`,
   );
   // Every package private: nothing was checked, and the line says only that.
   assert.equal(
@@ -810,6 +810,33 @@ test("shareText never reads as fully clean when a private index's packages weren
     `owner/name: 1 of 1 dependency has no wheel on 1 target (checked with wheelgap) ${url}`,
   );
 });
+
+for (const { name, packages, gaps, notChecked, result, tail } of [
+  { name: "one checked dependency", packages: 1, gaps: 0, notChecked: 1,
+    result: "1 checked dependency has a wheel on Python 3.13 for 1 platform",
+    tail: "; 1 more wasn't checked (its index isn't known to be PyPI)" },
+  { name: "several checked dependencies", packages: 3, gaps: 0, notChecked: 2,
+    result: "all 3 checked dependencies have a wheel on Python 3.13 for 1 platform",
+    tail: "; 2 more weren't checked (their index isn't known to be PyPI)" },
+  { name: "gaps among checked dependencies", packages: 5, gaps: 2, notChecked: 1,
+    result: "2 of 5 checked dependencies have no wheel on 1 target",
+    tail: "; 1 more wasn't checked (its index isn't known to be PyPI)" },
+  { name: "one dependency with none left unchecked", packages: 1, gaps: 0, notChecked: 0,
+    result: "1 dependency has a wheel on Python 3.13 for 1 platform", tail: "" },
+  { name: "several dependencies with none left unchecked", packages: 3, gaps: 0, notChecked: 0,
+    result: "all 3 dependencies have a wheel on Python 3.13 for 1 platform", tail: "" },
+  { name: "gaps with none left unchecked", packages: 5, gaps: 2, notChecked: 0,
+    result: "2 of 5 dependencies have no wheel on 1 target", tail: "" },
+]) {
+  test(`shareText counts ${name}`, () => {
+    const url = "https://wheelgap.github.io/tracker/check/?repo=o/r";
+    const mark = gaps === 0 && notChecked === 0 ? "✓ " : "";
+    assert.equal(
+      shareText("o/r", { packages, gaps, unknown: 0, targets: 1 }, ["3.13"], ["linux-x86_64"], url, notChecked),
+      `${mark}o/r: ${result}${tail} (checked with wheelgap) ${url}`,
+    );
+  });
+}
 
 test("next steps offer what isn't picked yet, as whole selections", () => {
   const steps = nextSteps(["3.14"], ["linux-x86_64"]);
