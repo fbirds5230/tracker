@@ -449,6 +449,85 @@ def test_offline_follows_the_reader_not_the_exact_name():
     assert {p: driver._reads_offline(p) for p in offline} == offline
 
 
+def fetched_script_lock(tmp_path, files, *, unread=(), lockfile="jobs/run.py.lock"):
+    """The full checkout and the browser's files after plan/configs_for, including failed GitHub fetches."""
+    full, browser = tmp_path / "full", tmp_path / "browser"
+    for root in (full, browser):
+        (root / ".git").mkdir(parents=True)
+    for name, text in {lockfile: LOCK, **files}.items():
+        path = full / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+    listing = configs(full)
+    for name in [lockfile, *json.loads(driver.configs_for(lockfile, listing))]:
+        if name in unread:
+            continue
+        path = browser / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes((full / name).read_bytes())
+    return full, browser, listing
+
+
+@pytest.mark.parametrize("files", [
+    {"jobs/run.py": '# /// script\n# dependencies = []\n# [tool.uv]\n# no-build = true\n# ///\n'},
+    {"uv.toml": "no-binary = true\n"},
+    {"pyproject.toml": "[tool.uv]\nno-build = true\n"},
+    # A pyproject without [tool.uv] doesn't stop uv's search for a configuration above it.
+    {"jobs/pyproject.toml": '[project]\nname = "demo"\n', "uv.toml": "no-build = true\n"},
+])
+def test_script_lock_fetches_build_settings_and_reports_the_cli_refusal(tmp_path, files):
+    full, browser, listing = fetched_script_lock(tmp_path, files)
+    with pytest.raises(sources.SourceError) as cli:
+        sources.load_file(full / "jobs/run.py.lock")
+    expected = str(cli.value).replace(f"{full}/", "")
+    result = json.loads(driver.check(str(browser), "jobs/run.py.lock", options(), "{}", listing))
+    assert result == {"kind": "source", "error": expected}
+
+
+@pytest.mark.parametrize("missing", [
+    "jobs/run.py", "jobs/uv.toml", "jobs/pyproject.toml", "uv.toml", "pyproject.toml",
+])
+def test_script_lock_cannot_be_checked_without_a_needed_file_the_repo_lists(tmp_path, missing):
+    _, browser, listing = fetched_script_lock(tmp_path, {missing: ""}, unread=[missing])
+    result = json.loads(driver.check(str(browser), "jobs/run.py.lock", options(), "{}", listing))
+    assert result.get("kind") == "source", result
+    assert missing in result["error"] and "couldn't be fetched" in result["error"]
+    assert str(browser) not in result["error"]
+
+
+def test_script_lock_cannot_be_checked_when_the_repo_file_list_is_unknown(tmp_path):
+    _, browser, _ = fetched_script_lock(tmp_path, {})
+    result = json.loads(driver.check(str(browser), "jobs/run.py.lock", options(), "{}", "null"))
+    assert result.get("kind") == "source", result
+    assert "file list" in result["error"]
+
+
+@pytest.mark.parametrize("files, unread", [
+    ({}, []),  # no sibling script or settings in the complete tree: the CLI can read the lock alone
+    ({"jobs/run.py": '# /// script\n# dependencies = []\n# ///\nraise RuntimeError("never run")\n'}, []),
+    # A valid uv.toml wins over the pyproject beside it, and any local uv settings stop the ancestor search.
+    ({"jobs/uv.toml": "", "jobs/pyproject.toml": "[tool.uv]\nno-build = true\n"}, ["jobs/pyproject.toml"]),
+    ({"jobs/uv.toml": "", "uv.toml": "no-build = true\n"}, ["uv.toml"]),
+    ({"jobs/pyproject.toml": "[tool.uv]\n", "uv.toml": "no-build = true\n"}, ["uv.toml"]),
+])
+def test_script_lock_keeps_the_cli_config_precedence_and_allows_absent_metadata(tmp_path, files, unread):
+    full, browser, listing = fetched_script_lock(tmp_path, files, unread=unread)
+    sources.load_file(full / "jobs/run.py.lock")  # the full checkout is accepted too
+    result = json.loads(driver.check(str(browser), "jobs/run.py.lock", options(), "{}", listing))
+    assert "error" not in result, result
+    assert result["looked_up"] is False and result["packages"] > 0
+
+
+def test_script_lock_stops_at_the_nearest_ancestor_uv_config(tmp_path):
+    lockfile = "apps/jobs/run.py.lock"
+    full, browser, listing = fetched_script_lock(tmp_path, {
+        "apps/pyproject.toml": "[tool.uv]\n", "uv.toml": "no-build = true\n",
+    }, unread=["uv.toml"], lockfile=lockfile)
+    sources.load_file(full / lockfile)
+    result = json.loads(driver.check(str(browser), lockfile, options(), "{}", listing))
+    assert "error" not in result, result
+
+
 def test_check_refuses_lockfiles_that_need_an_index(repo):
     assert json.loads(driver.check(str(repo), "uv.lock", options(platforms=["amiga"])))["kind"] == "targets"
     (repo / "uv.lock").write_text("not toml [", encoding="utf-8")

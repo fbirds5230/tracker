@@ -87,7 +87,7 @@ function workerCheck({
   // `gone`: paths the worker believes it wrote that aren't in Pyodide's files any more, so removing them throws.
   const unlink = (path) => { removed.push(path); if (gone.includes(path)) throw new Error(`ENOENT: ${path}`); };
   const driver = {
-    needs: (...args) => { asked.push(args); return JSON.stringify(needs); },
+    needs: (...args) => { asked.push(args); return JSON.stringify(typeof needs === "function" ? needs(repo) : needs); },
     configs_for: (...args) => { nearAsked.push(args); return JSON.stringify(near); },
     check: (...args) => { checked.push(args); return JSON.stringify({ rows: [] }); },
     fixes: (...args) => { fixed.push(args); return "{}"; },
@@ -329,6 +329,50 @@ test("a settings file that fails to fetch isn't written, and the driver is still
   assert.equal(worker.checked[0][4], '["pyproject.toml"]');
   await worker.check();
   assert.deepEqual(worker.requested, ["pyproject.toml", "pyproject.toml"]);
+});
+
+test("a script lock fetches and keeps its script and settings, and drops the previous script's context", async () => {
+  const bytes = new Uint8Array([1]);
+  const configs = ["old/run.py", "old/pyproject.toml", "jobs/run.py", "uv.toml"];
+  const worker = workerCheck({
+    needs: { lookups: [], total: 0 }, fetch: async () => assert.fail("script locks need no index lookup"),
+    lockfile: "jobs/run.py.lock", configs,
+    fetched: ["jobs/run.py.lock", "old/run.py.lock", "old/run.py", "old/pyproject.toml"],
+    near: ["jobs/run.py", "uv.toml"], files: { "jobs/run.py": bytes, "uv.toml": bytes },
+  });
+  await worker.check();
+  assert.deepEqual(worker.requested.sort(), ["jobs/run.py", "uv.toml"]);
+  assert.deepEqual(worker.removed, ["/repos/1/old/run.py", "/repos/1/old/pyproject.toml"]);
+  assert.deepEqual([...worker.repo.fetched].sort(), ["jobs/run.py", "jobs/run.py.lock", "old/run.py.lock", "uv.toml"]);
+  assert.equal(worker.checked[0][4], JSON.stringify(configs));
+});
+
+test("a script that fails to fetch stays in the driver's listing and is retried", async () => {
+  const worker = workerCheck({
+    needs: { lookups: [], total: 0 }, fetch: async () => assert.fail("script locks need no index lookup"),
+    lockfile: "jobs/run.py.lock", configs: ["jobs/run.py"], near: ["jobs/run.py"],
+  });
+  await worker.check();
+  assert.deepEqual(worker.written, []);
+  assert.equal(worker.checked[0][4], '["jobs/run.py"]');
+  assert.deepEqual([...worker.repo.fetched], ["jobs/run.py.lock"]);
+  await worker.check();
+  assert.deepEqual(worker.requested, ["jobs/run.py", "jobs/run.py"]);
+});
+
+test("a requirements include ending in .py stays available through the check", async () => {
+  // Includes are requirements files regardless of their extension; this one must not be removed as old script metadata.
+  const worker = workerCheck({
+    needs: (repo) => repo.fetched.has("extra.py")
+      ? { lookups: [], total: 0 }
+      : { error: "extra.py is not on disk", kind: "include", path: "extra.py" },
+    fetch: async () => assert.fail("no lookup was asked for"), files: { "extra.py": new Uint8Array([1]) },
+  });
+  await worker.check();
+  assert.deepEqual(worker.requested, ["extra.py"]);
+  assert.deepEqual(worker.removed, []);
+  assert.deepEqual([...worker.repo.fetched].sort(), ["extra.py", "requirements.txt"]);
+  assert.equal(worker.checked.length, 1);
 });
 
 test("with a truncated file list the driver is handed null for the settings files, always as text", async () => {

@@ -165,6 +165,7 @@ def plan(paths_json: str) -> str:
     .python-version. Lockfiles come shallowest first, then in wheelgap's order, so the first is the one
     `wheelgap` would pick in the repo's root (or the nearest folder that has one)."""
     paths = [p for p in json.loads(paths_json) if isinstance(p, str)]
+    scripts = {p.removesuffix(".lock") for p in paths if p.endswith(".py.lock")}
     lockfiles, workflows, dockerfiles, templates = [], [], [], []
     for p in paths:
         pp = PurePosixPath(p)
@@ -213,9 +214,10 @@ def plan(paths_json: str) -> str:
                 and _skipped_folder(pp.parts[:-1])
                 and not any(f.startswith(".") or f in ("node_modules", "site-packages", "__pycache__") for f in pp.parts[:-1])
             ),
-            # Every installer settings file in the repo, wherever it is: configs_for() picks the ones a check reads.
-            # In any case: on a case-insensitive disk (macOS, Windows) wheelgap reads a Pyproject.toml too.
-            "configs": sorted(p for p in paths if PurePosixPath(p).name.lower() in CONFIG_NAMES),
+            # Every installer settings file, and the sibling scripts of *.py.lock files: configs_for() picks the
+            # ones a check reads. The scripts' inline [tool.uv] settings can make wheelgap refuse their locks.
+            # Settings names in any case: on a case-insensitive disk (macOS, Windows) wheelgap reads Pyproject.toml too.
+            "configs": sorted(p for p in paths if PurePosixPath(p).name.lower() in CONFIG_NAMES or p in scripts),
         }
     )
 
@@ -263,13 +265,46 @@ def _configs_listing(configs_json: str | None) -> list[str] | None:
 
 
 def configs_for(path: str, configs_json: str | None) -> str:
-    """The installer settings files the worker fetches before `path` is checked: the ones in the repo (plan()'s
-    `configs`) that wheelgap would read for it from disk, in its folder or a folder above it. Empty for a file whose
-    reader reads none (a lockfile read offline, a pixi.lock), or when the repo's list isn't known."""
+    """The settings files the worker fetches before `path` is checked, from plan()'s `configs`. A *.py.lock also
+    needs its sibling script and the uv settings beside or above it: unlike the other offline locks, these can
+    make wheelgap refuse it. Empty for a reader that needs none, or when the repo's list isn't known."""
     configs = _configs_listing(configs_json)
-    if configs is None or not _reads_nearby_configs(path):
+    if configs is None:
+        return json.dumps([])
+    if path.endswith(".py.lock"):
+        near = [c for c in _configs_near(path, configs) if PurePosixPath(c).name in ("uv.toml", "pyproject.toml")]
+        script = path.removesuffix(".lock")
+        return json.dumps(sorted(near + ([script] if script in configs else [])))
+    if not _reads_nearby_configs(path):
         return json.dumps([])
     return json.dumps(_configs_near(path, configs))
+
+
+def _require_script_configs(root: str, path: str, configs_json: str | None) -> None:
+    """Don't accept a script lock if files the CLI might read were lost on the way to the browser. A valid uv.toml
+    takes precedence over its pyproject.toml, and the nearest uv configuration stops the ancestor search, just as
+    sources._uv_config does. Failed fetches of files it shadows don't matter. load_file applies the settings and
+    reports wheelgap's refusal; this only checks that it has the files needed to do so."""
+    if not path.endswith(".py.lock"):
+        return
+    configs = _configs_listing(configs_json)
+    if configs is None:
+        raise SourceError(f"{path}: the repo's file list is incomplete, so the script's build settings can't be checked")
+
+    def require_fetched(name: str) -> None:
+        if name in configs and not (Path(root) / name).is_file():
+            raise SourceError(f"{path}: {name} couldn't be fetched, so the script's build settings can't be checked")
+
+    require_fetched(path.removesuffix(".lock"))
+    folder = PurePosixPath(path).parent
+    for directory in (folder, *folder.parents):
+        require_fetched(str(directory / "uv.toml"))
+        found = sources._uv_config(Path(root) / directory)
+        if found is not None and found[0].name == "uv.toml":
+            break
+        require_fetched(str(directory / "pyproject.toml"))
+        if found is not None:
+            break
 
 
 def _unread_configs(root: str, path: str, configs_json: str | None) -> dict | None:
@@ -535,9 +570,10 @@ def check(
     release's files for every Python, so nothing is `outside_lock` there: like the CLI, a pyproject.toml is checked
     on the targets asked for, whatever its requires-python.
 
-    configs: as for needs(). The result's `configs` are the installer settings files beside the file or above it that
-    were read; `configs_unread` the ones the repo has there that couldn't be fetched, and `configs_unknown` says the
-    repo's list of them wasn't known: either keeps every package of the file off pypi.org.
+    configs: as for needs(). The result's `configs` are the settings files (or a script lock's sibling script) read;
+    `configs_unread` are ones the repo has that couldn't be fetched, and `configs_unknown` says the repo's list
+    wasn't known: either keeps every package of a lookups file off pypi.org. A script lock whose required settings
+    couldn't be fetched returns a source error instead, since they may make wheelgap refuse the entire check.
 
     The result's `private` names the packages left off pypi.org as a private index's (they're in `skipped` too),
     and `looked_up` says whether the files came from PyPI rather than from the lockfile. `listed` counts the packages
@@ -556,6 +592,7 @@ def check(
         return json.dumps({"error": str(e), "kind": "targets"})
     path = Path(root) / lockfile
     try:
+        _require_script_configs(root, lockfile, configs_json)
         source = load_file(path)
     except (SourceError, ValueError, OSError) as e:  # ValueError: a lockfile that isn't valid TOML or JSON
         error = {"error": str(e).replace(f"{root}/", ""), "kind": "source"}

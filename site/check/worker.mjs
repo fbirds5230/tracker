@@ -154,13 +154,13 @@ async function load(r, id, requestedFile = null) {
 }
 
 // A pyproject.toml is fetched when it's the file to check, and installer settings files (a pyproject.toml, uv.toml or
-// pdm.toml) when they're beside the file to check or above it (fetchConfigs). wheelgap also reads a pyproject.toml
-// beside a lockfile, when it's there, for the project's settings ([tool.uv] no-binary, an index), so any of them that
-// isn't `keep` (the file to check and its own settings files) is removed before the driver reads that file: each
-// file reads as it does when it's the first one checked, whichever file the visitor looked at before it.
+// pdm.toml) when they're beside the file to check or above it (fetchConfigs), as well as a *.py.lock's sibling script.
+// wheelgap also reads a pyproject.toml beside a lockfile, when it's there, for the project's settings ([tool.uv]
+// no-binary, an index). Anything outside `keep` (the file to check, its includes, settings files and sibling script)
+// is removed before the driver reads it: each file reads as it does when it's the first one checked.
 function dropOtherProjects(py, repo, keep) {
   for (const path of [...repo.fetched]) {
-    if (keep.includes(path) || !CONFIG_NAMES.includes(path.split("/").pop())) continue;
+    if (keep.includes(path) || (!CONFIG_NAMES.includes(path.split("/").pop()) && !path.endsWith(".py"))) continue;
     try {
       py.FS.unlink(`${repo.root}/${path}`);
     } catch {
@@ -171,7 +171,7 @@ function dropOtherProjects(py, repo, keep) {
 }
 
 // The repo's installer settings files (plan()'s `configs`) for the driver, always as a string: "null" when they
-// aren't known, which keeps every file that reads them private.
+// aren't known, which keeps lookups files private and prevents checking a script lock with unknown build settings.
 function configsJson(repo) {
   return JSON.stringify(Array.isArray(repo.configs) ? repo.configs : null);
 }
@@ -180,7 +180,8 @@ function configsJson(repo) {
 // pyproject.toml or pdm.toml in its folder or a folder above it names another index (a [tool.uv] index, say), which it
 // reads from disk. So the ones the repo has there (the driver's configs_for) are fetched before the driver reads the
 // file, and kept while it does: returns them, for dropOtherProjects. One that can't be fetched is left out, and the
-// driver, finding it in the repo's list but not on disk, looks nothing of the file up on PyPI.
+// driver, finding it in the repo's list but not on disk, looks nothing of the file up on PyPI. A *.py.lock also needs
+// its sibling script and uv settings: the driver refuses its check if a required one couldn't be fetched.
 async function fetchConfigs(id, repo, lockfile) {
   const { py, driver } = await ready;
   if (id !== latestCheck) throw new Failure("stale", "superseded by a newer check");
@@ -190,7 +191,7 @@ async function fetchConfigs(id, repo, lockfile) {
     try {
       bytes = await getText(rawUrl(repo, repo.ref, p));
     } catch {
-      return; // not on disk, so the driver keeps the file private and the page says why
+      return; // the driver sees it is missing and keeps the file private, or refuses a script lock's check
     }
     if (!loaded.has(repo.root)) return; // don't recreate a removed root
     write(py, repo.root, p, bytes);
@@ -219,6 +220,7 @@ async function lookups(id, repo, lockfile, keep) {
     if (!loaded.has(repo.root)) throw new Failure("stale", "superseded by a newer load");
     write(py, repo.root, n.path, bytes);
     repo.fetched.add(n.path);
+    keep.push(n.path); // An include can be named like a script or settings file too.
   }
   throw new Failure("file", "This file's includes go too deep to read here.");
 }
