@@ -69,7 +69,7 @@ test("a result with no package checked shows the verdict and the setup, but no b
 // configs_for() names for the file, and `files` what GitHub answers for them (a missing one fails to fetch).
 function workerCheck({
   needs, fetch, releases = new Map(), lockfile = "requirements.txt", fetched = [lockfile], gone = [],
-  configs = [], near = [], files = {},
+  configs = [], near = [], files = {}, result = { rows: [] },
 }) {
   const source = read("worker.mjs");
   const fn = (name) => {
@@ -84,12 +84,13 @@ function workerCheck({
   const nearAsked = []; // the driver's configs_for() calls
   const requested = []; // files asked of GitHub
   const written = [];
+  const bytes = (path) => typeof files[path] === "string" ? new TextEncoder().encode(files[path]) : files[path];
   // `gone`: paths the worker believes it wrote that aren't in Pyodide's files any more, so removing them throws.
   const unlink = (path) => { removed.push(path); if (gone.includes(path)) throw new Error(`ENOENT: ${path}`); };
   const driver = {
-    needs: (...args) => { asked.push(args); return JSON.stringify(typeof needs === "function" ? needs(repo) : needs); },
+    needs: (...args) => { asked.push(args); return JSON.stringify(typeof needs === "function" ? needs(repo, args[1]) : needs); },
     configs_for: (...args) => { nearAsked.push(args); return JSON.stringify(near); },
-    check: (...args) => { checked.push(args); return JSON.stringify({ rows: [] }); },
+    check: (...args) => { checked.push(args); return JSON.stringify(result); },
     fixes: (...args) => { fixed.push(args); return "{}"; },
   };
   const repo = { root: "/repos/1", ref: "HEAD", fetched: new Set(fetched), configs };
@@ -100,11 +101,11 @@ function workerCheck({
       const path = url.split(":").pop();
       requested.push(path);
       if (!(path in files)) throw new Error(`Couldn't fetch ${path} (404).`);
-      return files[path];
+      return bytes(path);
     },
     write: (py, root, path, bytes) => written.push([root, path, bytes]),
     trimProject: checkLogic.trimProject, trimReleases: checkLogic.trimReleases,
-    ready: Promise.resolve({ py: { FS: { unlink } }, driver }),
+    ready: Promise.resolve({ py: { FS: { unlink, readFile: (path) => bytes(path.replace("/repos/1/", "")) } }, driver }),
     loaded: new Map([[repo.root, repo]]),
     post: () => {},
   };
@@ -115,6 +116,7 @@ function workerCheck({
     ${fn("pool")}
     ${fn("configsJson")}
     ${fn("fetchConfigs")}
+    ${fn("workflowConfig")}
     ${fn("lookups")}
     ${fn("dropOtherProjects")}
     ${fn("check")}
@@ -125,7 +127,7 @@ function workerCheck({
     };
   `)(env);
   return {
-    check: () => made.check(lockfile), fixes: made.fixes, supersede: made.supersede,
+    check: (path = lockfile) => made.check(path), fixes: made.fixes, supersede: made.supersede,
     checked, fixed, releases, removed, repo, asked, nearAsked, requested, written,
   };
 }
@@ -568,11 +570,83 @@ test("a requirements include ending in .py stays available through the check", a
       : { error: "extra.py is not on disk", kind: "include", path: "extra.py" },
     fetch: async () => assert.fail("no lookup was asked for"), files: { "extra.py": new Uint8Array([1]) },
   });
-  await worker.check();
+  assert.equal((await worker.check()).includes, true);
   assert.deepEqual(worker.requested, ["extra.py"]);
   assert.deepEqual(worker.removed, []);
   assert.deepEqual([...worker.repo.fetched].sort(), ["extra.py", "requirements.txt"]);
   assert.equal(worker.checked.length, 1);
+});
+
+test("requirements includes stay marked on repeat checks and shared cached reads, without marking a plain file", async () => {
+  for (const option of ["-r", "-c"]) {
+    const worker = workerCheck({
+      needs: (repo, path) => path === "plain.txt"
+        ? { lookups: [], total: 0 }
+        : repo.fetched.has("base.txt")
+          ? { lookups: [], total: 0, includes: true }
+          : { error: "base.txt is not on disk", kind: "include", path: "base.txt" },
+      fetch: async () => assert.fail("no package lookup was asked for"),
+      files: { "requirements.txt": `${option} base.txt\n`, "other.txt": `${option} base.txt\n`, "plain.txt": "", "base.txt": "" },
+      fetched: [],
+    });
+    for (const path of ["requirements.txt", "requirements.txt", "other.txt"]) {
+      assert.equal((await worker.check(path)).includes, true, `${option} in ${path}`);
+    }
+    assert.equal(worker.requested.filter((p) => p === "base.txt").length, 1, "the cached include is not fetched again");
+    assert.ok(!(await worker.check("plain.txt")).includes, "a previous include cannot mark another input");
+    assert.equal(worker.checked.length, 4, "all four ordinary checks still reach the driver");
+  }
+});
+
+test("an offline lock reads only its sibling workflow configuration, without changing the checker's files", async () => {
+  const config = '[tool.wheelgap]\nindex-url = "https://packages.example/simple"\n[tool.uv]\nno-binary = true\n';
+  const result = { rows: [], packages: 2, private: [], config_index_url: true };
+  const worker = workerCheck({
+    needs: { lookups: [], total: 0 }, fetch: async () => assert.fail("an offline lock needs no package lookup"),
+    lockfile: "app/uv.lock", configs: ["pyproject.toml", "app/pyproject.toml", "app/uv.toml", "other/pyproject.toml"],
+    files: { "app/pyproject.toml": config, "app/uv.toml": "no-binary = false\n", "other/uv.lock": "lock", "other/pyproject.toml": "[tool.ruff]\n" }, result,
+  });
+  const checked = await worker.check();
+  assert.deepEqual(worker.requested, ["app/pyproject.toml"]);
+  assert.equal(worker.checked[0][5], JSON.stringify(config));
+  assert.deepEqual(worker.written, [], "workflow-only configuration must not introduce installer settings");
+  assert.deepEqual([...worker.repo.fetched], ["app/uv.lock"]);
+  assert.deepEqual(worker.removed, []);
+  assert.equal(checked.config_index_url, true);
+  assert.equal(checked.packages, 2);
+  assert.deepEqual(checked.private, []);
+  assert.deepEqual(checked.rows, result.rows);
+  await worker.check();
+  assert.deepEqual(worker.requested, ["app/pyproject.toml"], "the workflow metadata is cached separately");
+  assert.equal(worker.checked[1][5], JSON.stringify(config));
+  await worker.check("other/uv.lock");
+  assert.equal(worker.checked[2][5], JSON.stringify("[tool.ruff]\n"), "another input never inherits the cached configuration");
+  assert.deepEqual(worker.written.map(([, path]) => path), ["other/uv.lock"], "only the checked file was added to the filesystem");
+
+  const plain = workerCheck({
+    needs: { lookups: [], total: 0 }, fetch: async () => assert.fail("no package lookup"),
+    lockfile: "app/uv.lock", configs: ["pyproject.toml"],
+  });
+  await plain.check();
+  assert.deepEqual(plain.requested, [], "an ancestor's wheelgap setting does not apply");
+  assert.equal(plain.checked[0][5], '""');
+});
+
+test("workflow configuration stays unknown after a failed read or a truncated listing, and failed reads retry", async () => {
+  for (const [configs, files] of [
+    [["pyproject.toml"], {}],
+    [null, {}],
+    [["pyproject.toml"], { "pyproject.toml": new Uint8Array([0xc3, 0x28]) }], // invalid UTF-8, never replacement text
+  ]) {
+    const worker = workerCheck({
+      needs: { lookups: [], total: 0 }, fetch: async () => assert.fail("no package lookup"), lockfile: "uv.lock", configs, files,
+    });
+    await worker.check();
+    await worker.check();
+    assert.deepEqual(worker.checked.map((args) => args[5]), ["null", "null"]);
+    assert.deepEqual(worker.requested, configs ? ["pyproject.toml", "pyproject.toml"] : []);
+    assert.deepEqual(worker.written, []);
+  }
 });
 
 test("with a truncated file list the driver is handed null for the settings files, always as text", async () => {
@@ -683,7 +757,7 @@ test("the workflow panel renders and copies the checked release, and clears stal
     repo: { owner: "o", name: "r" }, plan: { lockfiles: [{ path: "uv.lock" }] },
     pythons: ["3.14", "3.14t"], platforms: ["linux-x86_64", "win-arm64"],
     result: {
-      lockfile: "uv.lock", packages: 2, rows: [], private: [], outside_lock: [],
+      lockfile: "uv.lock", packages: 2, rows: [], private: [], outside_lock: [], config_index_url: false,
       targets: ["3.14", "3.14t"].flatMap((python) => ["linux-x86_64", "win-arm64"].map((platform) => ({
         label: `${python} ${platform}`, python, platform,
       }))),
@@ -734,6 +808,22 @@ test("the workflow panel renders and copies the checked release, and clears stal
   renderNext();
   assert.equal($("workflow").hidden, false);
   assert.equal($("workflow-yaml").textContent, yaml);
+
+  for (const [lockfile, flags] of [
+    ["requirements.txt", { includes: true, config_index_url: false }],
+    ["uv.lock", { includes: false, config_index_url: true }],
+    ["uv.lock", { includes: false, config_index_url: null }],
+  ]) {
+    Object.assign(state.result, { lockfile, ...flags });
+    renderNext();
+    assert.equal($("workflow").hidden, true, `${lockfile}: ${JSON.stringify(flags)}`);
+    assert.equal($("workflow-yaml").textContent, "", "an unsupported check clears the previous workflow");
+    assert.equal($("cli").textContent, checkLogic.cliCommand(state.result, state.pythons, state.platforms));
+    Object.assign(state.result, { lockfile: "uv.lock", includes: false, config_index_url: false });
+    renderNext();
+    assert.equal($("workflow").hidden, false, "an ordinary input still offers its workflow after this check");
+    assert.equal($("workflow-yaml").textContent, yaml);
+  }
 
   state.result.private = ["internal-package"];
   renderNext();

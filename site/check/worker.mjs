@@ -233,6 +233,34 @@ async function fetchConfigs(id, repo, lockfile) {
   return near;
 }
 
+// compare-to refuses index-url in the input's sibling pyproject.toml. Read it for the workflow separately:
+// putting a previously unfetched file on disk would also apply its installer settings to the ordinary check.
+// Empty text means no sibling exists; null means it couldn't be read, so no workflow can be offered yet.
+async function workflowConfig(id, repo, lockfile, keep) {
+  const { py } = await ready;
+  if (id !== latestCheck) throw new Failure("stale", "superseded by a newer check");
+  if (!Array.isArray(repo.configs)) return null;
+  const path = `${lockfile.slice(0, lockfile.lastIndexOf("/") + 1)}pyproject.toml`;
+  if (!repo.configs.includes(path)) return "";
+  let text;
+  try {
+    let bytes;
+    if (repo.fetched.has(path)) bytes = py.FS.readFile(`${repo.root}/${path}`);
+    else {
+      if (keep.includes(path)) return null; // fetchConfigs already tried, and will retry on the next check
+      if (repo.workflowConfigs?.has(path)) return repo.workflowConfigs.get(path);
+      bytes = await getText(rawUrl(repo, repo.ref, path));
+    }
+    text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  } catch {
+    return null; // failed reads aren't cached
+  }
+  if (id !== latestCheck || !loaded.has(repo.root)) throw new Failure("stale", "superseded by a newer check");
+  repo.workflowConfigs ??= new Map();
+  repo.workflowConfigs.set(path, text);
+  return text;
+}
+
 // Asks the driver which packages a lookups file (requirements file, pyproject.toml, Pipfile.lock, pixi.lock)
 // needs looked up, fetching its includes (-r, -c) from the same repo and ref when it names them. An include
 // that's a URL, or outside the repo, comes back as an error naming it and stops here. A file wheelgap can't read
@@ -240,12 +268,14 @@ async function fetchConfigs(id, repo, lockfile) {
 // files: a superseded one stops here, so it can't take away the file a newer check is about to read.
 async function lookups(id, repo, lockfile, keep) {
   const { py, driver } = await ready;
+  let includes = false;
   for (let tries = 0; tries < 10; tries++) {
     if (id !== latestCheck) throw new Failure("stale", "superseded by a newer check");
     dropOtherProjects(py, repo, keep);
     const n = JSON.parse(driver.needs(repo.root, lockfile, configsJson(repo)));
-    if (!n.error) return n.lookups ?? [];
-    if (n.kind !== "include") return [];
+    if (!n.error) return { lookups: n.lookups ?? [], includes: includes || Boolean(n.includes) };
+    if (n.kind !== "include") return { lookups: [], includes };
+    includes = true;
     if (!n.path || repo.fetched.has(n.path)) throw new Failure("file", n.error);
     post({ id, type: "progress", stage: "lockfile", path: n.path });
     const bytes = await getText(rawUrl(repo, repo.ref, n.path));
@@ -272,7 +302,7 @@ async function check(id, root, lockfile, options) {
   // does; packages over the cap, or that fail, stay unknown, never counted as gaps. `missed` counts them, for the
   // page to say why: over the cap, not on PyPI (a 404), or a lookup that failed.
   const keep = [lockfile, ...(await fetchConfigs(id, repo, lockfile))];
-  const wanted = await lookups(id, repo, lockfile, keep);
+  const { lookups: wanted, includes } = await lookups(id, repo, lockfile, keep);
   const fetched = {};
   const missed = { cap: MAX_LOOKUPS, over_cap: Math.max(0, wanted.length - MAX_LOOKUPS), not_found: 0, failed: 0 };
   if (wanted.length) {
@@ -299,13 +329,17 @@ async function check(id, root, lockfile, options) {
       }
     });
   }
+  const workflowConfigJson = JSON.stringify(await workflowConfig(id, repo, lockfile, keep));
   // The driver keeps the last check's targets for fixes(), so a superseded check must never reach it.
   if (id !== latestCheck) throw new Failure("stale", "superseded by a newer check");
   post({ id, type: "progress", stage: "checking" });
   dropOtherProjects(py, repo, keep); // again: a check that this one superseded may have fetched one since
   // Always a string: Pyodide may hand a JS null to Python as something other than None.
-  const result = JSON.parse(driver.check(repo.root, lockfile, JSON.stringify(options), JSON.stringify(fetched), configsJson(repo)));
-  if (!result.error) result.missed = missed;
+  const result = JSON.parse(driver.check(repo.root, lockfile, JSON.stringify(options), JSON.stringify(fetched), configsJson(repo), workflowConfigJson));
+  if (!result.error) {
+    result.missed = missed;
+    if (includes) result.includes = true;
+  }
   return result;
 }
 

@@ -21,6 +21,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import tomllib
 from dataclasses import replace
 from pathlib import Path, PurePosixPath
 
@@ -709,7 +710,15 @@ def needs(root: str, path: str, configs_json: str | None = None) -> str:
         _lookup_key(pkg): {"name": canonicalize_name(pkg.name), "version": pkg.version or None}
         for pkg in _lookups(source, allow_public_extra=bool(extra_hosts), extra_pkg_hosts=extra_pkg_hosts)
     }
-    return json.dumps({"lookups": list(lookups.values()), "total": len(lookups)})
+    # Missing includes are visible to the worker, but cached ones aren't: use the same reader to record every
+    # file this input reads, including empty requirements and constraints files, on every check.
+    result = {"lookups": list(lookups.values()), "total": len(lookups)}
+    if source.kind == "requirements":
+        seen: dict[bool, set[Path]] = {False: set(), True: set()}
+        sources._read_requirements(Path(root) / path, seen, [])
+        if len(seen[False]) > 1 or seen[True]:
+            result["includes"] = True
+    return json.dumps(result)
 
 
 def _fill_lookups(
@@ -739,8 +748,28 @@ def _fill_lookups(
             pkg.files = None  # as fill_all(): never judged on the files a pixi.lock happened to record
 
 
+def _config_index_url(workflow_config_json: str | None) -> bool | None:
+    """Whether diff would refuse the sibling [tool.wheelgap] index-url; None when that file isn't known."""
+    try:
+        text = json.loads(workflow_config_json) if workflow_config_json is not None else None
+        if not isinstance(text, str):
+            return None
+        tool = tomllib.loads(text.removeprefix("\ufeff")).get("tool", {})
+        table = tool.get("wheelgap", {}) if isinstance(tool, dict) else None
+        if isinstance(table, dict):
+            return table.get("index-url") is not None  # diff refuses even an empty value
+    except ValueError:
+        pass
+    return None
+
+
 def check(
-    root: str, lockfile: str, options_json: str, lookups_json: str | None = None, configs_json: str | None = None
+    root: str,
+    lockfile: str,
+    options_json: str,
+    lookups_json: str | None = None,
+    configs_json: str | None = None,
+    workflow_config_json: str | None = None,
 ) -> str:
     """The lockfile's packages with a gap on any target, read offline from the files it lists.
 
@@ -761,6 +790,9 @@ def check(
     `configs_unread` are ones the repo has that couldn't be fetched, and `configs_unknown` says the repo's list
     wasn't known: either keeps every package of a lookups file off pypi.org. A script lock whose required settings
     couldn't be fetched returns a source error instead, since they may make wheelgap refuse the entire check.
+
+    workflow_config_json: the sibling pyproject.toml's text as JSON, "" when it doesn't exist, or null when it
+    couldn't be read. This only determines `config_index_url` for the workflow; it applies no installer settings.
 
     The result's `private` names the packages left off pypi.org as a private index's (they're in `skipped` too),
     and `looked_up` says whether the files came from PyPI rather than from the lockfile. `listed` counts the packages
@@ -902,6 +934,7 @@ def check(
             "configs": read_configs,
             "configs_unread": unread["unread"],
             "configs_unknown": unread["unknown"],
+            "config_index_url": _config_index_url(workflow_config_json),
             "extra_indexes": extra_hosts,
             "reader": source.kind,
             "looked_up": looked_up,

@@ -681,7 +681,9 @@ function renderNext() {
     : "No selected target is known to be covered by the lockfile's environments. Choose a covered target before checking again.";
   // The link names the lockfile only when a visit with the repo alone would start from another one.
   $("badge-md").textContent = badgeMarkdown(state.repo, r.lockfile, autoPick(state.plan.lockfiles.filter((l) => !l.added), null, state.pickContext ?? {}).lock?.path ?? null);
-  const workflow = notCheckedCount(r) ? null : workflowYaml(r, state.pythons, state.platforms, wheelgapVersion);
+  // compare-to can't read includes or use a configured index; an unread config isn't safe to offer either.
+  const workflow = notCheckedCount(r) || r.includes || r.config_index_url !== false
+    ? null : workflowYaml(r, state.pythons, state.platforms, wheelgapVersion);
   $("workflow").hidden = workflow === null;
   $("workflow-yaml").textContent = workflow ?? "";
   const caveats = [

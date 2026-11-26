@@ -1301,6 +1301,60 @@ def test_needs_names_a_missing_include_and_works_once_its_fetched(tmp_path):
     ]
 
 
+@pytest.mark.parametrize("option", ["-r", "-c"])
+def test_needs_reports_includes_even_when_the_files_are_already_cached(tmp_path, option):
+    (tmp_path / "base.txt").write_text("numpy==2.3.4\n", encoding="utf-8")
+    for name in ("requirements.txt", "other.txt"):
+        (tmp_path / name).write_text(f"{option} base.txt\nnumpy==2.3.4\n", encoding="utf-8")
+    (tmp_path / "plain.txt").write_text("numpy==2.3.4\n", encoding="utf-8")
+    listing = configs(tmp_path)
+    for name in ("requirements.txt", "requirements.txt", "other.txt"):
+        n = json.loads(driver.needs(str(tmp_path), name, listing))
+        assert n["includes"] is True
+        assert n["lookups"] == [{"name": "numpy", "version": "2.3.4"}]
+    plain = json.loads(driver.needs(str(tmp_path), "plain.txt", listing))
+    assert not plain.get("includes")
+    assert plain["lookups"] == [{"name": "numpy", "version": "2.3.4"}]
+
+
+def test_needs_distinguishes_an_include_from_an_option_value(tmp_path):
+    (tmp_path / "requirements.txt").write_text("--no-binary -r\nnumpy==2.3.4\n", encoding="utf-8")
+    n = json.loads(driver.needs(str(tmp_path), "requirements.txt", configs(tmp_path)))
+    assert "error" not in n
+    assert not n.get("includes")
+    assert n["lookups"] == [{"name": "numpy", "version": "2.3.4"}]
+
+
+@pytest.mark.parametrize("index", ["https://packages.example/simple", ""])
+def test_offline_lock_reports_its_sibling_wheelgap_index_without_changing_the_check(repo, index):
+    before = json.loads(driver.check(str(repo), "uv.lock", options(), "{}", configs(repo)))
+    # The worker supplies workflow-only text separately; it must not apply this build policy to the check.
+    config = f'[tool.wheelgap]\nindex-url = "{index}"\n[tool.uv]\nno-binary = true\nno-build = true\n'
+    after = json.loads(driver.check(str(repo), "uv.lock", options(), "{}", configs(repo), json.dumps(config)))
+    assert after["config_index_url"] is True
+    for key in ("packages", "listed", "rows", "per_target", "private", "looked_up"):
+        assert after[key] == before[key]
+
+
+def test_workflow_index_setting_is_scoped_to_its_table_and_does_not_leak_between_checks(repo):
+    for config, expected in [
+        ('\ufeff[tool.wheelgap]\nindex-url = "https://packages.example/simple"\n', True),
+        ("", False),
+        ('[tool.other]\nindex-url = "https://packages.example/simple"\n', False),
+        ('[tool.wheelgap]\npython = "3.13"\n', False),
+    ]:
+        result = json.loads(driver.check(str(repo), "uv.lock", options(), "{}", configs(repo), json.dumps(config)))
+        assert result["config_index_url"] is expected
+
+
+@pytest.mark.parametrize("text", [None, "[tool.wheelgap", 'tool = "not a table"\n'])
+def test_offline_lock_keeps_an_unread_workflow_index_setting_unknown(repo, text):
+    result = json.loads(driver.check(str(repo), "uv.lock", options(), "{}", configs(repo), json.dumps(text)))
+    assert "error" not in result
+    assert result["config_index_url"] is None
+    assert result["packages"] > 0
+
+
 def test_needs_names_a_missing_include_under_a_root_reached_through_a_link(tmp_path):
     # wheelgap makes an include's path absolute without following links, so a root whose own path has one (macOS's
     # /var -> /private/var) must still contain it: compared with Path.resolve(), it never would.
