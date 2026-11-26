@@ -186,7 +186,7 @@ function onLoaded({ plan, detected, truncated, ref, root, fileInTree, projectNam
   // Inputs in folders plan() skips (build/, dist/) that `wheelgap DIR` searches are known by name only (unlistedInputs).
   state.pickContext = {
     rootProjectFiles: plan.root_project_files || [], pyprojects: {}, partial: Boolean(truncated || plan.more_lockfiles),
-    unlistedInputs: plan.unlisted_inputs || [],
+    unlistedInputs: plan.unlisted_inputs || [], pyprojectInputs: plan.pyproject_inputs || {},
   };
   const q = state.query;
   const requested = q?.lockfile || state.repo.file || null;

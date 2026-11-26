@@ -249,6 +249,38 @@ test("autoPick keeps the exactly-named files' pick, checks a lone other requirem
 const at = (path) => ({ path, offline: /(uv|poetry|pdm)\.lock$|pylock\.toml$/.test(path) });
 const req = (path) => ({ path, offline: false, other: true });
 
+test("autoPick leaves driver-confirmed non-input pyprojects out of the subfolder choice", () => {
+  const backend = at("backend/uv.lock");
+  const settings = at("scripts/pyproject.toml");
+  const ctx = { pyprojectInputs: { [settings.path]: false } };
+  assert.deepEqual(autoPick([backend, settings], null, ctx), { lock: backend, choose: null, why: "subfolder" });
+  assert.deepEqual(autoPick([settings], null, ctx), { lock: null, choose: [settings], why: "elsewhere" });
+  assert.deepEqual(autoPick([backend, settings], null, { ...ctx, partial: true }), {
+    lock: null, choose: [backend], why: "subfolders",
+  });
+  assert.deepEqual(autoPick([settings, at("docs/uv.lock")], null, ctx), {
+    lock: null, choose: [at("docs/uv.lock")], why: "side",
+  });
+});
+
+test("autoPick still asks about a subfolder pyproject with dependencies or no classification", () => {
+  const files = [at("backend/uv.lock"), at("scripts/pyproject.toml")];
+  for (const pyprojectInputs of [{}, { "scripts/pyproject.toml": true }, { "scripts/pyproject.toml": null }]) {
+    assert.deepEqual(autoPick(files, null, { pyprojectInputs }), { lock: null, choose: files, why: "subfolders" });
+  }
+});
+
+test("a pyproject classification preserves root, named-folder and explicit-file priority", () => {
+  const files = [at("pyproject.toml"), at("backend/uv.lock"), at("scripts/pyproject.toml")];
+  const ctx = { pyprojectInputs: { "pyproject.toml": false, "scripts/pyproject.toml": false } };
+  assert.equal(autoPick(files, null, ctx).lock.path, "pyproject.toml");
+  assert.equal(autoPick(files, "scripts", ctx).lock.path, "scripts/pyproject.toml");
+  const requested = pickRequestedFile(files.slice(1), "scripts/pyproject.toml", true, null, ctx);
+  assert.equal(requested.lock.path, "scripts/pyproject.toml");
+  assert.equal(requested.auto, false);
+  assert.deepEqual(requested.lockfiles, files.slice(1)); // still available in the manual picker
+});
+
 test("autoPick checks the only input in a subfolder, and says so (MiroFish: backend/uv.lock)", () => {
   assert.deepEqual(autoPick([at("backend/uv.lock")], null), { lock: at("backend/uv.lock"), choose: null, why: "subfolder" });
   // One per folder, its first in plan()'s order: a pyproject.toml beside a lockfile isn't a second input.

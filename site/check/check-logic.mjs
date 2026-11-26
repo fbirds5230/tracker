@@ -152,8 +152,8 @@ function rootProject(ctx) {
 //    told from a name.
 // 3. Otherwise one input per subfolder up to NESTED_DEPTH folders down (the folders plan() skips are left out), as
 //    `wheelgap FOLDER` reads it: its first exactly-named file in plan()'s order, a pyproject.toml last. A
-//    pyproject.toml counts whether or not it lists dependencies, which the page can't tell before fetching it: that
-//    can only make the page ask where `wheelgap DIR` wouldn't, never pick where it would ask. The only one is
+//    pyproject.toml counts unless the driver read it and found no input (`ctx.pyprojectInputs[path]` is false).
+//    A failed or capped fetch stays a possible input, so the page can ask where `wheelgap DIR` wouldn't. The only one is
 //    checked (`why: "subfolder"`) when its folders' names aren't side words, the whole file list is known
 //    (`ctx.partial` false, and no input that isn't side-named in a folder plan() skips but `wheelgap DIR` searches,
 //    `ctx.unlistedInputs`: build/requirements.txt), the root isn't a project of its own (rootProject), and no other requirements file could as
@@ -170,6 +170,7 @@ export function autoPick(lockfiles, dir, ctx = {}) {
     const here = named.find((l) => folderOf(l.path) === base);
     if (here) return { lock: here, choose: null };
   }
+  const hasInput = (path) => !path.endsWith("/pyproject.toml") || ctx.pyprojectInputs?.[path] !== false;
   const others = lockfiles.filter((l) => l.other);
   // wheelgap's _other_requirements(folder): requirements*.txt in the folder, and any *.txt in its requirements/
   // folder. plan() also marks *-requirements.txt and *_requirements.txt, which `wheelgap DIR` doesn't read.
@@ -186,7 +187,7 @@ export function autoPick(lockfiles, dir, ctx = {}) {
   const folders = new Set();
   for (const l of named) {
     const folder = folderOf(l.path);
-    if (folders.has(folder) || folder.split("/").length > NESTED_DEPTH) continue;
+    if (!hasInput(l.path) || folders.has(folder) || folder.split("/").length > NESTED_DEPTH) continue;
     folders.add(folder);
     (isSideFile(l.path) ? side : main).push(l);
   }

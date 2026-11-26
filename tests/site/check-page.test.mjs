@@ -130,6 +130,206 @@ function workerCheck({
   };
 }
 
+// Run the real load/getText/pool functions on a GitHub tree and raw-file responses. The driver answers only the
+// classification here; tests/test_check_driver.py compares that answer with wheelgap's actual folder reader.
+function workerLoad({
+  lockfiles, files = {}, inputs = {}, near = {}, configs = null, dir = null, requested = null, truncated = false, onFile = () => {},
+}) {
+  const source = read("worker.mjs");
+  const fn = (name) => source.match(new RegExp(`^(?:async )?function ${name}\\(.*?^}$`, "ms"))[0];
+  const requests = [], written = new Map(), removed = [], classified = [];
+  const loaded = new Map();
+  let active = 0, maxActive = 0;
+  const plan = { lockfiles, workflows: [], dockerfiles: [], configs: configs ?? lockfiles.map((l) => l.path).filter((p) => p.endsWith("pyproject.toml")) };
+  const fetch = async (url) => {
+    requests.push(url);
+    if (url.startsWith("https://api.github.com/repos/")) {
+      return { ok: true, json: async () => ({ truncated, tree: lockfiles.map((l) => ({ type: "blob", path: l.path })) }) };
+    }
+    assert.ok(url.startsWith("https://raw.githubusercontent.com/owner/repo/HEAD/"), "only raw files, no package lookups");
+    const path = decodeURIComponent(url.slice("https://raw.githubusercontent.com/owner/repo/HEAD/".length));
+    return {
+      ok: path in files, status: path in files ? 200 : 404, headers: { get: () => null },
+      arrayBuffer: async () => {
+        active++;
+        maxActive = Math.max(maxActive, active);
+        await new Promise(setImmediate);
+        onFile(path);
+        active--;
+        return new TextEncoder().encode(files[path]).buffer;
+      },
+    };
+  };
+  const py = {
+    FS: {
+      mkdirTree() {}, writeFile: (path, bytes) => written.set(path, bytes),
+      unlink: (path) => { removed.push(path); written.delete(path); },
+    },
+    pyimport: () => ({ rmtree: { callKwargs: (root) => {
+      removed.push(root);
+      for (const path of written.keys()) if (path.startsWith(`${root}/`)) written.delete(path);
+    } } }),
+  };
+  const driver = {
+    plan: () => JSON.stringify(plan),
+    detect: () => JSON.stringify({ pythons: ["3.14"], platforms: ["linux-x86_64"], unreadable: [] }),
+    configs_for: (path, listing) => JSON.stringify(listing === "null" ? [] : near[path] || []),
+    pyproject_inputs: (root, paths, listing) => {
+      classified.push([root, JSON.parse(paths), listing]);
+      return JSON.stringify(Object.fromEntries(JSON.parse(paths).filter((p) => inputs[p] !== null).map((path) => {
+        assert.ok(written.has(`${root}/${path}`), "classification reads a fetched file");
+        return [path, inputs[path] ?? false];
+      })));
+    },
+  };
+  const env = {
+    fetch, loaded, ready: Promise.resolve({ py, driver }), post: () => {},
+    rawUrl: checkLogic.rawUrl, metadataFiles: checkLogic.metadataFiles, projectNameFromMetadata: checkLogic.projectNameFromMetadata,
+    pickRequestedFile: checkLogic.pickRequestedFile,
+  };
+  const made = new Function("env", `
+    const { fetch, loaded, ready, post, rawUrl, metadataFiles, projectNameFromMetadata, pickRequestedFile } = env;
+    let latestLoad = 7;
+    const MAX_FILE = 25 * 1024 * 1024;
+    const CONFIG_NAMES = ["uv.toml", "pyproject.toml", "pdm.toml"];
+    ${source.match(/^const MAX_SUBFOLDER_(?:PYPROJECTS|FILES) = \d+;/m)?.[0] || ""}
+    class Failure extends Error { constructor(kind, message) { super(message); this.kind = kind; } }
+    ${["getJson", "getText", "pool", "write", "forget", "load", "dropOtherProjects"].map(fn).join("\n")}
+    return { load, supersede: () => { latestLoad = 8; }, dropOtherProjects };
+  `)(env);
+  return {
+    load: () => made.load({ owner: "owner", name: "repo", dir }, 7, requested),
+    supersede: made.supersede, requests, written, removed, classified, loaded,
+    drop: (keep) => made.dropOtherProjects(py, loaded.get("/repos/7"), keep),
+    maxActive: () => maxActive,
+  };
+}
+
+test("load classifies candidate subfolder pyprojects using raw files and keeps them in cleanup", async () => {
+  const lockfiles = [{ path: "backend/uv.lock", offline: true }, { path: "scripts/pyproject.toml", offline: false }];
+  const worker = workerLoad({ lockfiles, files: { "scripts/pyproject.toml": "[tool.ruff]\n" } });
+  const result = await worker.load();
+  assert.deepEqual(worker.requests, [
+    "https://api.github.com/repos/owner/repo/git/trees/HEAD?recursive=1",
+    "https://raw.githubusercontent.com/owner/repo/HEAD/scripts/pyproject.toml",
+  ]);
+  assert.deepEqual(result.plan.pyproject_inputs, { "scripts/pyproject.toml": false });
+  assert.deepEqual([...worker.loaded.get(result.root).fetched], ["scripts/pyproject.toml"]);
+  worker.drop(["scripts/pyproject.toml"]);
+  assert.equal(worker.written.size, 1, "kept if the check needs this configuration");
+  worker.drop(["backend/uv.lock"]);
+  assert.deepEqual(worker.removed, ["/repos/7/scripts/pyproject.toml"]);
+  assert.equal(worker.written.size, 0);
+});
+
+test("load leaves a failed subfolder pyproject fetch as a possible input", async () => {
+  const lockfiles = [{ path: "backend/uv.lock", offline: true }, { path: "scripts/pyproject.toml", offline: false }];
+  const worker = workerLoad({ lockfiles });
+  const result = await worker.load();
+  assert.equal(worker.requests.length, 2);
+  assert.deepEqual(result.plan.pyproject_inputs, {});
+  assert.deepEqual(checkLogic.autoPick(lockfiles, null, { pyprojectInputs: result.plan.pyproject_inputs }).choose, lockfiles);
+});
+
+test("load includes the settings that can override a subfolder pyproject before classifying it", async () => {
+  const path = "scripts/pyproject.toml";
+  const configs = [path, "scripts/uv.toml"];
+  const worker = workerLoad({
+    lockfiles: [{ path: "backend/uv.lock", offline: true }, { path, offline: false }], configs,
+    files: { [path]: '[project]\ndependencies = ["purewheel"]\n[tool.uv]\nexclude-newer = "not-a-date"\n', "scripts/uv.toml": "" },
+    near: { [path]: configs }, inputs: { [path]: true },
+  });
+  const result = await worker.load();
+  assert.deepEqual(worker.requests.slice(1).sort(), configs.map((p) => `https://raw.githubusercontent.com/owner/repo/HEAD/${p}`).sort());
+  assert.deepEqual(worker.classified, [[result.root, [path], JSON.stringify(configs)]]);
+  assert.deepEqual([...worker.loaded.get(result.root).fetched].sort(), configs);
+  assert.equal(checkLogic.autoPick(result.plan.lockfiles, null, { pyprojectInputs: result.plan.pyproject_inputs }).lock, null);
+  worker.drop(["backend/uv.lock"]);
+  assert.equal(worker.written.size, 0, "both the pyproject and its overriding settings are cleaned up");
+});
+
+test("failed or unlisted settings keep a subfolder classification unknown", async () => {
+  const path = "scripts/pyproject.toml";
+  const configs = [path, "scripts/uv.toml"];
+  for (const truncated of [false, true]) {
+    const worker = workerLoad({
+      lockfiles: [{ path: "backend/uv.lock", offline: true }, { path, offline: false }], configs, truncated,
+      files: { [path]: '[project]\ndependencies = ["purewheel"]\n' },
+      near: { [path]: configs }, inputs: { [path]: null },
+    });
+    const result = await worker.load();
+    assert.equal(worker.classified[0][2], JSON.stringify(truncated ? null : configs));
+    assert.equal(worker.requests.length, truncated ? 2 : 3);
+    assert.deepEqual(result.plan.pyproject_inputs, {});
+    assert.equal(checkLogic.autoPick(result.plan.lockfiles, null, { pyprojectInputs: result.plan.pyproject_inputs }).lock, null);
+  }
+});
+
+test("the preload budget includes required settings and hands incomplete contexts to the driver", async () => {
+  const paths = Array.from({ length: 8 }, (_, i) => `pkg${i}/pyproject.toml`);
+  const near = Object.fromEntries(paths.map((p) => [p, [p, p.replace("pyproject.toml", "uv.toml"), p.replace("pyproject.toml", "pdm.toml")]]));
+  const configs = Object.values(near).flat();
+  const worker = workerLoad({
+    lockfiles: paths.map((path) => ({ path, offline: false })), configs, near,
+    files: Object.fromEntries(configs.map((p) => [p, ""])),
+    inputs: Object.fromEntries(paths.map((p, i) => [p, i < 6 ? false : null])),
+  });
+  const result = await worker.load();
+  assert.equal(worker.requests.length, 21, "the same 20-file cap covers pyprojects and settings together");
+  assert.equal(worker.maxActive(), 4);
+  assert.deepEqual(worker.classified, [[result.root, paths, JSON.stringify(configs)]]);
+  assert.equal(worker.written.size, 20);
+  assert.deepEqual(checkLogic.autoPick(result.plan.lockfiles, null, { pyprojectInputs: result.plan.pyproject_inputs }).choose.map((l) => l.path), paths.slice(6));
+});
+
+test("load skips subfolder classification for a root input or an explicit selection", async () => {
+  const subfolders = [{ path: "backend/uv.lock", offline: true }, { path: "scripts/pyproject.toml", offline: false }];
+  for (const opts of [
+    { lockfiles: [{ path: "uv.lock", offline: true }, ...subfolders] },
+    { lockfiles: [{ path: "pyproject.toml", offline: false }, ...subfolders] },
+    { lockfiles: [{ path: "requirements.txt", offline: false }, ...subfolders] },
+    { lockfiles: [...subfolders, { path: "requirements-prod.txt", offline: false, other: true }] },
+    { lockfiles: [...subfolders, { path: "requirements/a.txt", other: true }, { path: "requirements/b.txt", other: true }] },
+    { lockfiles: subfolders, dir: "scripts" },
+    { lockfiles: subfolders, requested: "backend/uv.lock" },
+    { lockfiles: [{ path: "a/b/c/d/pyproject.toml", offline: false }] },
+  ]) {
+    const worker = workerLoad(opts);
+    await worker.load();
+    assert.ok(worker.requests.every((url) => !url.endsWith("/scripts/pyproject.toml") && !url.includes("/a/b/c/d/")));
+    assert.deepEqual(worker.classified, []);
+  }
+});
+
+test("load caps subfolder pyproject fetches and leaves the rest unknown", async () => {
+  const paths = Array.from({ length: 25 }, (_, i) => `pkg${String(i).padStart(2, "0")}/pyproject.toml`);
+  const lockfiles = [{ path: "backend/uv.lock", offline: true }, ...paths.map((path) => ({ path, offline: false }))];
+  const worker = workerLoad({ lockfiles, files: Object.fromEntries(paths.map((p) => [p, "[tool.ruff]\n"])) });
+  const result = await worker.load();
+  assert.equal(worker.requests.length, 21, "one tree request and at most 20 raw files");
+  assert.equal(worker.maxActive(), 4);
+  assert.deepEqual(Object.keys(result.plan.pyproject_inputs), paths.slice(0, 20));
+  const pick = checkLogic.autoPick(lockfiles, null, { pyprojectInputs: result.plan.pyproject_inputs });
+  assert.equal(pick.lock, null);
+  assert.deepEqual(pick.choose.map((l) => l.path), ["backend/uv.lock", ...paths.slice(20)]);
+});
+
+test("a superseded subfolder preload cannot classify, write or replace the newer repository", async () => {
+  const paths = Array.from({ length: 6 }, (_, i) => `pkg${i}/pyproject.toml`);
+  const newer = { root: "/repos/8" };
+  const worker = workerLoad({
+    lockfiles: paths.map((path) => ({ path, offline: false })),
+    files: Object.fromEntries(paths.map((p) => [p, "[tool.ruff]\n"])),
+    onFile: () => { worker.supersede(); worker.loaded.set(newer.root, newer); },
+  });
+  await assert.rejects(worker.load(), { kind: "stale" });
+  assert.equal(worker.requests.length, 5, "only the four already running raw requests finish");
+  assert.deepEqual(worker.classified, []);
+  assert.equal(worker.written.size, 0);
+  assert.deepEqual(worker.removed, ["/repos/7"]);
+  assert.deepEqual([...worker.loaded.values()], [newer]);
+});
+
 test("check trims pinned and project JSON before the driver and keeps only trimmed releases for fixes", async () => {
   // digests.sha256 (for --hash options) and upload_time_iso_8601 (for exclude-newer) are read since wheelgap 0.14.0.
   const file = {
@@ -850,6 +1050,19 @@ function pickPage(lockfiles, { query = null, lockfile = null } = {}) {
   return { page, state, calls, loaded };
 }
 
+test("onLoaded uses the worker's pyproject classification without removing manual choices", () => {
+  const lockfiles = [{ path: "backend/uv.lock", offline: true }, { path: "scripts/pyproject.toml", offline: false }];
+  const p = pickPage(lockfiles);
+  p.page.onLoaded({
+    plan: { lockfiles: [...lockfiles], pyproject_inputs: { "scripts/pyproject.toml": false } },
+    detected: { pythons: ["3.14"], platforms: ["linux-x86_64"], unreadable: [] },
+    truncated: false, ref: "HEAD", root: "/repos/1",
+  });
+  assert.deepEqual(p.calls, [["runCheck", "backend/uv.lock"]]);
+  assert.deepEqual(p.state.plan.lockfiles, lockfiles);
+  assert.equal(p.state.subfolderPick, "backend/uv.lock");
+});
+
 test("with several requirements files under other names and nothing else, the page asks which one, never guesses", () => {
   const celery = [
     { path: "pyproject.toml", offline: false },
@@ -920,7 +1133,7 @@ test("with several requirements files under other names and nothing else, the pa
 
 // Exercise the page's actual selection and render pipeline, with the worker and DOM stood in. The driver contract
 // is pinned by test_check_driver.py; these tests check what the visitor sees after that result reaches the page.
-function resultPage(locks, query = null, { dir = null, rootProjectFiles = [], unlistedInputs = [] } = {}) {
+function resultPage(locks, query = null, { dir = null, rootProjectFiles = [], unlistedInputs = [], pyprojectInputs = {} } = {}) {
   const source = read("check.mjs");
   const fn = (name) => source.match(new RegExp(`^function ${name}\\(.*?^}$`, "ms"))[0];
   const elements = new Map();
@@ -958,10 +1171,22 @@ function resultPage(locks, query = null, { dir = null, rootProjectFiles = [], un
   };
   const functions = ["el", "chip", "onLoaded", "runCheck", "onResult", "render", "notCheckedCount", "renderVerdict", "renderSetup", "hideResultSections", "chooseFile", "noLockfile"];
   const page = new Function(...Object.keys(env), `let seq = 0; ${functions.map(fn).join("\n")}; return {onLoaded, onResult};`)(...Object.values(env));
-  page.onLoaded({ plan: { lockfiles: locks, workflows: [], root_project_files: rootProjectFiles, unlisted_inputs: unlistedInputs },
+  page.onLoaded({ plan: { lockfiles: locks, workflows: [], root_project_files: rootProjectFiles, unlisted_inputs: unlistedInputs, pyproject_inputs: pyprojectInputs },
     detected: { found: [], unreadable: [], pythons: ["3.14"], platforms: ["linux-x86_64"] }, ref: "HEAD", root: "/repos/1" });
   return { ...page, $, state, posts, urls };
 }
+
+test("after an automatically picked private pyproject, the remaining settings file is still offered manually", () => {
+  const page = resultPage([
+    { path: "app/pyproject.toml", offline: false }, { path: "scripts/pyproject.toml", offline: false },
+  ], null, { pyprojectInputs: { "app/pyproject.toml": true, "scripts/pyproject.toml": false } });
+  assert.equal(page.posts[0].lockfile, "app/pyproject.toml");
+  page.onResult({ ...privateResult, lockfile: "app/pyproject.toml" });
+  assert.equal(page.posts.length, 1);
+  assert.equal(page.state.lockfile, null);
+  assert.equal(page.$("verdict").textContent, "Pick the file to check");
+  assert.match(page.$("verdict-detail").textContent, /no input.*only scripts\/pyproject\.toml/);
+});
 
 test("a repo with no listed or unlisted input still says no lockfile was found", () => {
   const page = resultPage([]);

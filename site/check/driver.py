@@ -4,6 +4,7 @@ The worker does every network request (GitHub and PyPI, in parallel, from the br
 files it was given, with wheelgap's own functions, so the page says what `uvx wheelgap` would say on the same lock:
 
 - plan(paths): from the repo's file list, which files to fetch.
+- pyproject_inputs(root, paths): which fetched subfolder pyprojects `wheelgap DIR` counts as inputs.
 - detect(root): the targets and Pythons the repo's workflows and Dockerfiles name (wheelgap --suggest-targets).
 - needs(root, path): the PyPI lookups a file that doesn't list its packages' files needs before it can be checked.
 - check(root, lockfile, ...): the lockfile's gaps, from the files the lock lists or the ones PyPI answered with.
@@ -220,6 +221,19 @@ def plan(paths_json: str) -> str:
             "configs": sorted(p for p in paths if PurePosixPath(p).name.lower() in CONFIG_NAMES or p in scripts),
         }
     )
+
+
+def pyproject_inputs(root: str, paths_json: str, configs_json: str | None = None) -> str:
+    """Which fetched pyprojects count in wheelgap's subfolder search: [project] dependencies, not just groups or
+    settings, with something to check. Use the same reader and predicate as sources._nested_inputs; no package
+    lookups are needed. Require the nearby settings too: uv.toml or a workspace's settings can override this file's
+    own. Missing or unknown settings stay unknown, so an incomplete fetch never rules out a possible input."""
+    inputs = {}
+    for path in json.loads(paths_json):
+        file = Path(root) / path
+        if file.name == "pyproject.toml" and file.is_file() and _unread_configs(root, path, configs_json) is None:
+            inputs[path] = sources._folder_input(file.parent, {file.name}) is not None
+    return json.dumps(inputs)
 
 
 def _pyproject_is_project(path: Path) -> bool:

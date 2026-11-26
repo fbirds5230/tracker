@@ -4,7 +4,7 @@
 // Messages in: {id, type: "load", repo} | {id, type: "check", lockfile, options}. Out: {id, type, ...}.
 
 import { loadPyodide } from "https://cdn.jsdelivr.net/pyodide/v314.0.8/full/pyodide.mjs";
-import { rawUrl, trimProject, trimReleases, projectNameFromMetadata, metadataFiles } from "./check-logic.mjs";
+import { rawUrl, trimProject, trimReleases, projectNameFromMetadata, metadataFiles, pickRequestedFile } from "./check-logic.mjs";
 
 // The wheelgap release the page runs; tests/test_check_driver.py tests driver.py against the same one.
 // When this changes, re-read what that release's pypi._fill_json_data, pypi._newest_matching, pypi._sha256,
@@ -16,6 +16,7 @@ const MAX_FIX_LOOKUPS = 80;
 const MAX_GAP_WHEELS_BYTES = 4 * 1024 * 1024;
 const GAP_WHEELS_URL = "https://wheelgap.github.io/wheels/data/gap-wheels.json";
 const MAX_LOOKUPS = 300; // more packages than that stay unknown, never counted as gaps
+const MAX_SUBFOLDER_FILES = 20; // pyprojects and their settings together; incomplete inputs stay possible
 // The installer settings files wheelgap reads beside a requirements file, a pyproject.toml or a Pipfile.lock and in the
 // folders above it (driver.CONFIG_NAMES; tests/test_check_driver.py checks they match).
 const CONFIG_NAMES = ["uv.toml", "pyproject.toml", "pdm.toml"];
@@ -131,6 +132,37 @@ async function load(r, id, requestedFile = null) {
   py.FS.mkdirTree(`${root}/.git`);
   const detected = JSON.parse(driver.detect(root));
   detected.unreadable.push(...unread);
+  // Only when selection reaches the subfolders (up to 3 down): a pyproject beside a preferred lockfile, at the
+  // root, or explicitly named needn't be classified. Unfetched files still count as possible inputs in autoPick.
+  const picked = pickRequestedFile(plan.lockfiles, wanted, fileInTree, r.dir, {
+    rootProjectFiles: plan.root_project_files || [], partial: Boolean(tree.truncated || plan.more_lockfiles),
+    unlistedInputs: plan.unlisted_inputs || [],
+  });
+  const pyprojects = picked.auto && picked.why && picked.why !== "elsewhere"
+    ? (picked.choose || [picked.lock]).filter((l) => !l.added && l.path.endsWith("/pyproject.toml")).slice(0, MAX_SUBFOLDER_FILES).map((l) => l.path)
+    : [];
+  const configs = JSON.stringify(tree.truncated ? null : plan.configs);
+  // The same settings as a check reads, including a uv.toml that shadows [tool.uv] and a workspace root's settings.
+  // A shared ancestor is fetched once; if the cap or a failed request leaves one out, the driver keeps that input unknown.
+  const subfolderFiles = [...new Set([
+    ...pyprojects, ...pyprojects.flatMap((path) => JSON.parse(driver.configs_for(path, configs))),
+  ])].slice(0, MAX_SUBFOLDER_FILES);
+  const fetched = new Set();
+  plan.pyproject_inputs = {};
+  await pool(subfolderFiles, 4, async (path) => {
+    if (id !== latestLoad) return;
+    try {
+      const bytes = await getText(rawUrl(r, ref, path));
+      if (id !== latestLoad) return;
+      write(py, root, path, bytes);
+      fetched.add(path);
+    } catch {
+      // A failed fetch isn't evidence that the file has no dependencies: leave it in the choice.
+    }
+  });
+  if (fetched.size && id === latestLoad) {
+    plan.pyproject_inputs = JSON.parse(driver.pyproject_inputs(root, JSON.stringify(pyprojects.filter((p) => fetched.has(p))), configs));
+  }
   let projectName = null;
   // #229's requirements files under other names don't count: a lone root pyproject.toml beside them is still read.
   for (const metaFile of metadataFiles(plan.lockfiles.filter((l) => !l.other), paths)) {
@@ -149,11 +181,11 @@ async function load(r, id, requestedFile = null) {
   for (const old of [...loaded.keys()]) forget(py, old);
   // `configs`: the repo's installer settings files, or null when GitHub cut the file list short, so one may be missing
   // from it: then the driver keeps every file that reads them private.
-  loaded.set(root, { ...r, ref, root, fetched: new Set(), configs: tree.truncated ? null : plan.configs });
+  loaded.set(root, { ...r, ref, root, fetched, configs: tree.truncated ? null : plan.configs });
   return { plan, detected, truncated: Boolean(tree.truncated), ref, root, fileInTree, projectName };
 }
 
-// A pyproject.toml is fetched when it's the file to check, and installer settings files (a pyproject.toml, uv.toml or
+// A pyproject.toml is fetched to classify a subfolder input or to check it, and installer settings (pyproject.toml, uv.toml or
 // pdm.toml) when they're beside the file to check or above it (fetchConfigs), as well as a *.py.lock's sibling script.
 // wheelgap also reads a pyproject.toml beside a lockfile, when it's there, for the project's settings ([tool.uv]
 // no-binary, an index). Anything outside `keep` (the file to check, its includes, settings files and sibling script)

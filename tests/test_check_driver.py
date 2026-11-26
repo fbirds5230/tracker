@@ -105,6 +105,87 @@ def test_worker_pins_the_tested_wheelgap():
     assert pin and pin.group(1) == wheelgap.__version__
 
 
+@pytest.mark.parametrize(
+    ("text", "is_input"),
+    [
+        ('[tool.ruff]\nline-length = 100\n', False),
+        ('[dependency-groups]\ndev = ["pytest"]\n', False),
+        ('[project]\nname = "demo"\n', False),
+        ('[project]\nname = "demo"\ndynamic = ["dependencies"]\n', False),
+        ('[project\n', False),
+        ('[project]\nname = "demo"\ndependencies = ["purewheel==1.0"]\n', True),
+        ('[project.optional-dependencies]\ntest = ["pytest"]\n', False),
+        ('[project]\ndependencies = ["local @ file:///tmp/local"]\n', False),
+        ('[project]\ndependencies = ["internal-package"]\n[tool.uv]\nindex-url = "https://private.invalid/simple"\n', True),
+    ],
+    ids=["settings", "groups", "empty-project", "dynamic", "invalid", "dependencies", "extras-only", "skipped", "private"],
+)
+def test_subfolder_pyproject_inputs_follow_wheelgap_folder_input(tmp_path, text, is_input):
+    path = tmp_path / "scripts" / "pyproject.toml"
+    path.parent.mkdir()
+    path.write_text(text, encoding="utf-8")
+    # The same predicate as sources._nested_inputs, without lookups or a check of its packages.
+    assert (sources._folder_input(path.parent, {path.name}) is not None) is is_input
+    assert json.loads(driver.pyproject_inputs(str(tmp_path), '["scripts/pyproject.toml"]', configs(tmp_path))) == {
+        "scripts/pyproject.toml": is_input
+    }
+
+
+def test_subfolder_pyproject_inputs_leave_unfetched_files_unknown(tmp_path):
+    assert json.loads(driver.pyproject_inputs(str(tmp_path), '["scripts/pyproject.toml"]')) == {}
+
+
+def test_subfolder_pyproject_inputs_need_the_settings_listing(tmp_path):
+    path = tmp_path / "scripts" / "pyproject.toml"
+    path.parent.mkdir()
+    path.write_text('[project]\ndependencies = ["purewheel"]\n[tool.uv]\nexclude-newer = "not-a-date"\n')
+    # An unfetched uv.toml could override the invalid setting. With no tree context this cannot be ruled out.
+    assert json.loads(driver.pyproject_inputs(str(tmp_path), '["scripts/pyproject.toml"]')) == {}
+
+
+@pytest.mark.parametrize("workspace", [False, True], ids=["sibling-uv", "workspace-uv"])
+def test_subfolder_pyproject_inputs_follow_installer_config_precedence(tmp_path, workspace):
+    import shutil
+    import subprocess
+
+    full, browser = tmp_path / "full", tmp_path / "browser"
+    for root in (full, browser):
+        (root / ".git").mkdir(parents=True)
+    path = "workspace/jobs/pyproject.toml" if workspace else "scripts/pyproject.toml"
+    project = '[project]\nname = "other"\ndependencies = ["purewheel==1.0"]\n[tool.uv]\nexclude-newer = "not-a-date"\n'
+    files = {path: project, "backend/uv.lock": LOCK}
+    if workspace:
+        files["workspace/pyproject.toml"] = '[tool.uv]\nexclude-newer = "not-a-date"\n[tool.uv.workspace]\nmembers = ["jobs"]\n'
+        files["workspace/uv.toml"] = ""
+    else:
+        files["scripts/uv.toml"] = ""
+    for name, text in files.items():
+        dest = full / name
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_text(text, encoding="utf-8")
+    # A valid uv.toml replaces the invalid pyproject settings, including a workspace root's settings for a member.
+    assert sources._folder_input((full / path).parent, {"pyproject.toml"}) == full / path
+    listing, paths = configs(full), json.dumps([path])
+    assert json.loads(driver.pyproject_inputs(str(full), paths, listing)) == {path: True}
+    cli = subprocess.run(
+        [sys.executable, "-m", "wheelgap", str(full), "--offline", "--json", "-p", "3.13", "-t", "linux-x86_64"],
+        capture_output=True, text=True, timeout=30,
+    )
+    assert cli.returncode == 2
+    assert str(full / path) in cli.stderr and str(full / "backend/uv.lock") in cli.stderr
+
+    # A download failure or the worker's total file cap can leave only the candidate on disk. That isn't false.
+    (browser / path).parent.mkdir(parents=True)
+    shutil.copyfile(full / path, browser / path)
+    assert json.loads(driver.pyproject_inputs(str(browser), paths, listing)) == {}
+    assert json.loads(driver.pyproject_inputs(str(full), paths, "null")) == {}  # truncated tree
+    for name in json.loads(driver.configs_for(path, listing)):
+        dest = browser / name
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(full / name, dest)
+    assert json.loads(driver.pyproject_inputs(str(browser), paths, listing)) == {path: True}
+
+
 def test_plan_picks_files_like_suggest_targets():
     paths = [
         "README.md",
