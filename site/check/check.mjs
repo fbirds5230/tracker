@@ -5,7 +5,7 @@ import {
   PLATFORMS, PYTHONS, parseRepo, inputHint, pickRequestedFile, autoPick, toQuery, fromQuery, sortPythons, freeThreaded,
   fixFor, rowsFor, headline, cliCommand, packageCliCommand, fixPrompt, verdictText, shareText, nextSteps, validRef, labVerdict, labFor, canonicalName, gapWheelFor,
   gapWheelTitle, gapWheelsNote, gapWheelFixText, withoutUnreadable, unreadableReason, privatePyprojectReason, tileText, missedText, privateText, badgeMarkdown, fixLinks,
-  notCheckedTail, targetOutsideLock, environmentsText, nextSection, NESTED_DEPTH,
+  notCheckedTail, targetOutsideLock, environmentsText, nextSection, workflowYaml, NESTED_DEPTH,
 } from "./check-logic.mjs";
 
 const $ = (id) => document.getElementById(id);
@@ -398,6 +398,8 @@ function hideResultSections(hidden, keepSetup = false) {
   if (hidden) {
     $("next").hidden = true;
     $("verdict-badge").hidden = true;
+    $("workflow").hidden = true;
+    $("workflow-yaml").textContent = "";
     $("verdict").closest("section").classList.remove("clean");
   }
   for (const id of ["targets-title", "gaps-title", "next-title"]) $(id).closest("section").hidden = hidden;
@@ -679,6 +681,9 @@ function renderNext() {
     : "No selected target is known to be covered by the lockfile's environments. Choose a covered target before checking again.";
   // The link names the lockfile only when a visit with the repo alone would start from another one.
   $("badge-md").textContent = badgeMarkdown(state.repo, r.lockfile, autoPick(state.plan.lockfiles.filter((l) => !l.added), null, state.pickContext ?? {}).lock?.path ?? null);
+  const workflow = notCheckedCount(r) ? null : workflowYaml(r, state.pythons, state.platforms, wheelgapVersion);
+  $("workflow").hidden = workflow === null;
+  $("workflow-yaml").textContent = workflow ?? "";
   const caveats = [
     "A wheel on PyPI means pip and uv install it without compiling; it doesn't test that the package works there.",
     r.looked_up
@@ -710,6 +715,7 @@ const counted = (key) => [...new Set(state.result.targets.filter((t) => !targetO
 $("copy-share").onclick = (e) => copy(e.currentTarget, shareText(`${state.repo.owner}/${state.repo.name}`, headline(state.result), counted("python"), counted("platform"), location.href, notCheckedCount(state.result)), "Result copied");
 $("copy-prompt").onclick = (e) => copy(e.currentTarget, fixPrompt(`${state.repo.owner}/${state.repo.name}`, state.result, state.fixes, state.pythons, state.platforms, state.gapWheels, state.lab, notCheckedCount(state.result)), "Prompt copied");
 $("copy-badge").onclick = (e) => copy(e.currentTarget, $("badge-md").textContent, "Badge Markdown copied");
+$("copy-workflow").onclick = (e) => copy(e.currentTarget, $("workflow-yaml").textContent, "Workflow copied");
 $("copy-verdict-badge").onclick = (e) => copy(e.currentTarget, $("badge-md").textContent, "Badge Markdown copied");
 $("copy-gap-wheels").onclick = (e) => copy(e.currentTarget, state.gapWheels.text, "Gap wheel instructions copied");
 $("more").onclick = () => { state.showAll = true; renderTable(); };

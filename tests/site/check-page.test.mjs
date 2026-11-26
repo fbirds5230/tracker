@@ -649,6 +649,101 @@ test("the badge is a small static image on the page's own origin, offered as Mar
   assert.doesNotMatch(page, /innerHTML/);
 });
 
+test("the workflow panel renders and copies the checked release, and clears stale private or uncovered results", async () => {
+  const html = read("index.html");
+  const section = html.match(/<section id="workflow" aria-labelledby="workflow-title" hidden>(.*?)<\/section>/s);
+  assert.ok(section, "the workflow starts hidden");
+  assert.ok(html.indexOf('id="badge"') < html.indexOf('id="workflow"'));
+  assert.match(section[1], /<h3 id="workflow-title">Fail pull requests that add a gap<\/h3>/);
+  assert.match(section[1], /Save this as <code>\.github\/workflows\/wheelgap\.yml<\/code>/);
+  assert.match(section[1], /<pre><code id="workflow-yaml"><\/code><\/pre>/);
+  assert.match(section[1], /<button type="button" class="action" id="copy-workflow">Copy workflow<\/button>/);
+
+  const source = read("check.mjs");
+  const functions = ["notCheckedCount", "renderNext", "hideResultSections", "render", "copy"].map((name) => {
+    const found = source.match(new RegExp(`^(?:async )?function ${name}\\(.*?^}$`, "ms"));
+    assert.ok(found, name);
+    return found[0];
+  }).join("\n");
+  const ready = source.match(/^worker\.onmessage = \(\{ data \}\) => \{.*?^\};/ms);
+  const handler = source.match(/^\$\("copy-workflow"\)\.onclick = .*;$/m);
+  assert.ok(ready && handler, "the actual ready and copy handlers are used");
+  const ids = new Set([...html.matchAll(/\bid="([^"]+)"/g)].map((m) => m[1]));
+  const made = new Map();
+  const $ = (id) => {
+    assert.ok(ids.has(id), `${id} exists in the page`);
+    if (!made.has(id)) made.set(id, {
+      hidden: false, textContent: "", replaceChildren() {}, closest() { return this; },
+      classList: { add() {}, remove() {} },
+      set innerHTML(value) { assert.fail("workflow content must be text"); },
+    });
+    return made.get(id);
+  };
+  const state = {
+    repo: { owner: "o", name: "r" }, plan: { lockfiles: [{ path: "uv.lock" }] },
+    pythons: ["3.14", "3.14t"], platforms: ["linux-x86_64", "win-arm64"],
+    result: {
+      lockfile: "uv.lock", packages: 2, rows: [], private: [], outside_lock: [],
+      targets: ["3.14", "3.14t"].flatMap((python) => ["linux-x86_64", "win-arm64"].map((platform) => ({
+        label: `${python} ${platform}`, python, platform,
+      }))),
+    },
+  };
+  const copied = [];
+  const timers = [];
+  const worker = {};
+  const env = {
+    ...checkLogic, $, state, worker, el: () => ({}),
+    renderVerdict() {}, renderSetup() {}, renderTargets() {}, renderTable() {},
+    navigator: { clipboard: { async writeText(text) { copied.push(text); } } },
+    setTimeout: (fn) => { timers.push(fn); },
+    status: () => assert.fail("copy should succeed"),
+  };
+  const view = new Function(...Object.keys(env),
+    `let wheelgapVersion = null; ${ready[0]}\n${functions}\n${handler[0]}\nreturn { renderNext, render };`,
+  )(...Object.values(env));
+  const { renderNext } = view;
+  const version = read("worker.mjs").match(/^export const WHEELGAP = "wheelgap==([^"]+)";$/m)[1];
+  worker.onmessage({ data: { type: "ready", wheelgap: version } });
+  renderNext();
+  assert.equal($("workflow").hidden, false);
+  const yaml = checkLogic.workflowYaml(state.result, state.pythons, state.platforms, version);
+  assert.equal($("workflow-yaml").textContent, yaml);
+  const button = $("copy-workflow");
+  button.textContent = "Copy workflow";
+  await button.onclick({ currentTarget: button });
+  assert.deepEqual(copied, [yaml]);
+  assert.equal(button.textContent, "Workflow copied");
+  timers.shift()();
+  assert.equal(button.textContent, "Copy workflow");
+
+  state.result.private = ["internal-package"];
+  renderNext();
+  assert.equal($("workflow").hidden, true);
+  assert.equal($("workflow-yaml").textContent, "");
+  state.result.private = [];
+  state.result.outside_environments = state.result.targets.map((t) => t.label);
+  renderNext();
+  assert.equal($("workflow").hidden, true);
+  assert.equal($("workflow-yaml").textContent, "");
+
+  state.result.outside_environments = [];
+  state.result.lockfile = "changed <file>& #name/uv.lock";
+  worker.onmessage({ data: { type: "ready", wheelgap: "9.8.7" } });
+  renderNext();
+  assert.equal($("workflow").hidden, false);
+  const updated = checkLogic.workflowYaml(state.result, state.pythons, state.platforms, "9.8.7");
+  assert.equal($("workflow-yaml").textContent, updated);
+  await button.onclick({ currentTarget: button });
+  assert.deepEqual(copied, [yaml, updated], "copy reads the latest displayed text");
+  // render() returns before renderNext() when every package was left private; hideResultSections must clear too.
+  state.result.packages = 0;
+  state.result.private = ["internal-package"];
+  view.render();
+  assert.equal($("workflow").hidden, true);
+  assert.equal($("workflow-yaml").textContent, "");
+});
+
 test("a clean verdict offers the README badge in the verdict card and hides it for gaps or unknowns", () => {
   const html = read("index.html");
   const card = html.match(/<section aria-labelledby="verdict" class="verdict-card">(.*?)<\/section>/s);
@@ -695,14 +790,14 @@ test("a clean verdict offers the README badge in the verdict card and hides it f
     };
     const fns = new Function(
       "$", "state", "el", "headline", "verdictText", "nextSection", "nextSteps", "sortPythons", "missedText", "cliCommand", "badgeMarkdown",
-      "pickLockfile", "autoPick", "privatePyprojectReason", "privateText", "shareText", "copy", "location", "targetOutsideLock", "environmentsText",
+      "pickLockfile", "autoPick", "privatePyprojectReason", "privateText", "shareText", "copy", "location", "targetOutsideLock", "environmentsText", "workflowYaml", "wheelgapVersion",
       `${nc[0]}\n${rv[0]}\n${rn[0]}\n${countedSrc[0]}\n${shareSrc[0]}\nreturn { renderVerdict, renderNext };`,
     )(
       element, state, () => ({}), checkLogic.headline, checkLogic.verdictText, checkLogic.nextSection, checkLogic.nextSteps, checkLogic.sortPythons,
       checkLogic.missedText, checkLogic.cliCommand, checkLogic.badgeMarkdown, checkLogic.pickLockfile, checkLogic.autoPick,
       checkLogic.privatePyprojectReason, checkLogic.privateText, checkLogic.shareText,
       (button, text) => { button.copiedText = text; }, { href: "https://wheelgap.github.io/tracker/check/?repo=o/r" },
-      checkLogic.targetOutsideLock, checkLogic.environmentsText,
+      checkLogic.targetOutsideLock, checkLogic.environmentsText, checkLogic.workflowYaml, "9.8.7",
     );
     fns.renderVerdict();
     fns.renderNext();
@@ -1757,7 +1852,7 @@ test("uv environments distinguish excluded and undecided platforms throughout th
         ...extra,
       },
     };
-    const env = { ...checkLogic, $, state, el, NAMES: Object.fromEntries(checkLogic.PLATFORMS), SHOWN: 60,
+    const env = { ...checkLogic, $, state, el, wheelgapVersion: "9.8.7", NAMES: Object.fromEntries(checkLogic.PLATFORMS), SHOWN: 60,
       STATUS_TEXT: {}, LAB_SHORT: {}, FIX_TEXT: { private: () => "not looked up" } };
     new Function(...Object.keys(env), `${functions}; renderVerdict(); renderTargets(); renderTable(); renderNext();`)(...Object.values(env));
     const countedSource = source.match(/^const counted = (.*);$/m)[1];

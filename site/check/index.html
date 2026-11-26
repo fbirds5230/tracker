@@ -115,6 +115,12 @@
         <pre><code id="badge-md"></code></pre>
         <button type="button" class="action" id="copy-badge">Copy badge Markdown</button>
       </section>
+      <section id="workflow" aria-labelledby="workflow-title" hidden>
+        <h3 id="workflow-title">Fail pull requests that add a gap</h3>
+        <p class="note">Save this as <code>.github/workflows/wheelgap.yml</code>.</p>
+        <pre><code id="workflow-yaml"></code></pre>
+        <button type="button" class="action" id="copy-workflow">Copy workflow</button>
+      </section>
       <p>Run the same check locally or in CI:</p>
       <pre><code id="cli"></code></pre>
       <p class="note">It's the <a href="https://github.com/wheelgap/wheelgap">wheelgap</a> command line, also a <a href="https://github.com/wheelgap/wheelgap/blob/main/docs/ci.md">GitHub Action</a> and a pre-commit hook, so a new gap fails the pull request that adds it.</p>

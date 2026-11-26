@@ -516,6 +516,35 @@ export function cliCommand(result, pythons, platforms) {
   return `uvx wheelgap ${lock} -p ${sortPythons(selected.pythons).join(",")} -t ${selected.platforms.join(",")}`;
 }
 
+// The pull request gate uses the same covered targets and shell quoting as the local command.
+export function workflowYaml(result, pythons, platforms, version) {
+  const command = cliCommand(result, pythons, platforms);
+  if (!command) return null;
+  let args = command.slice("uvx wheelgap ".length);
+  // Actions evaluates expressions even inside YAML quotes. Keep a path containing ${{...}} literal.
+  if (args.includes("${{")) args = "${{ '" + args.replace(/'/g, "''") + "' }}";
+  // JSON strings are YAML strings too; escape YAML's extra line separators so no path can add a field.
+  const quoted = JSON.stringify(args).replace(/[\u0085\u2028\u2029]/g, (c) => "\\u" + c.charCodeAt(0).toString(16).padStart(4, "0"));
+  return `name: wheelgap
+on: pull_request
+permissions:
+  contents: read
+  pull-requests: write
+jobs:
+  wheels:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: wheelgap/wheelgap@v${version}
+        with:
+          args: ${quoted}
+          compare-to: base
+          comment: true
+`;
+}
+
 const PACKAGE_NAME = /^[A-Za-z0-9](?:[A-Za-z0-9._-]{0,98}[A-Za-z0-9])?$/;
 
 // Read the published PyPI package name from a root setup.cfg ([metadata] name) or pyproject.toml ([project] name).

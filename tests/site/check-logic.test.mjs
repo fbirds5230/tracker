@@ -5,7 +5,7 @@ import {
   parseRepo, inputHint, rawUrl, pickLockfile, autoPick, isSideFile, pickRequestedFile, isReadableFile, fileKind, toQuery, fromQuery, sortPythons, freeThreaded, fixFor, rowsFor, headline,
   cliCommand, packageCliCommand, projectNameFromMetadata, metadataFiles, fixPrompt, verdictText, shareText, nextSteps, validRef, labVerdict, labFor, canonicalName, gapWheelFor,
   gapWheelTitle, gapWheelsNote, gapWheelFixText, withoutUnreadable, unreadableReason, tileText, missedText, privateText, badgeMarkdown, trimProject, trimReleases,
-  fixLinks, validIssuesUrl, nextSection,
+  fixLinks, validIssuesUrl, nextSection, workflowYaml,
 } from "../../site/check/check-logic.mjs";
 
 test("PyPI trimming keeps the pinned consumer's fields without changing the input", () => {
@@ -589,6 +589,85 @@ test("the CLI command and the fix prompt reproduce the check", () => {
   assert.equal(cliCommand({ lockfile: "my app/uv.lock" }, ["3.14"], ["linux-x86_64"]), "uvx wheelgap 'my app/uv.lock' -p 3.14 -t linux-x86_64");
   assert.equal(packageCliCommand("httpie", ["3.14", "3.13"], ["linux-x86_64", "win-arm64"]), "uvx wheelgap --deps httpie -p 3.13,3.14 -t linux-x86_64,win-arm64");
   assert.equal(packageCliCommand("httpie; rm -rf /", ["3.14"], ["linux-x86_64"]), null);
+});
+
+test("the workflow is the pull request gate for the command's two Pythons and two platforms", () => {
+  const pythons = ["3.14t", "3.14"];
+  const platforms = ["linux-x86_64", "win-arm64"];
+  const yaml = workflowYaml(result, pythons, platforms, "9.8.7");
+  assert.equal(yaml, `name: wheelgap
+on: pull_request
+permissions:
+  contents: read
+  pull-requests: write
+jobs:
+  wheels:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: wheelgap/wheelgap@v9.8.7
+        with:
+          args: "uv.lock -p 3.14,3.14t -t linux-x86_64,win-arm64"
+          compare-to: base
+          comment: true
+`);
+  assert.equal(JSON.parse(yaml.match(/^          args: (.*)$/m)[1]), cliCommand(result, pythons, platforms).slice("uvx wheelgap ".length));
+  assert.match(workflowYaml(result, pythons, platforms, "9.8.8"), /uses: wheelgap\/wheelgap@v9\.8\.8\n/);
+});
+
+test("the workflow follows the CLI's smaller covered target selection", () => {
+  const r = { ...result, unknown_environments: { "3.14 win-arm64": "not decided" } };
+  const pythons = ["3.15", "3.14"];
+  const platforms = ["linux-x86_64", "win-arm64"];
+  const yaml = workflowYaml(r, pythons, platforms, "9.8.7");
+  const args = JSON.parse(yaml.match(/^          args: (.*)$/m)[1]);
+  assert.equal(args, "uv.lock -p 3.14,3.15 -t linux-x86_64");
+  assert.equal(args, cliCommand(r, pythons, platforms).slice("uvx wheelgap ".length));
+});
+
+test("no workflow is offered when the CLI has no covered target", () => {
+  const target = { label: "3.14 win-arm64", python: "3.14", platform: "win-arm64" };
+  for (const extra of [
+    { outside_environments: [target.label] },
+    { unknown_environments: { [target.label]: "not decided" } },
+  ]) {
+    const r = { lockfile: "uv.lock", targets: [target], ...extra };
+    assert.equal(cliCommand(r, ["3.14"], ["win-arm64"]), null);
+    assert.equal(workflowYaml(r, ["3.14"], ["win-arm64"], "9.8.7"), null);
+  }
+  assert.equal(workflowYaml(result, [], ["win-arm64"], "9.8.7"), null);
+  assert.equal(workflowYaml(result, ["3.14"], [], "9.8.7"), null);
+});
+
+test("workflow arguments keep path punctuation and line breaks in one YAML string", () => {
+  for (const lockfile of [
+    'my app: next #comment/"quotes"/uv.lock',
+    "one\n          comment: false\r\tback\\slash/uv.lock",
+    "O'Brien/uv.lock",
+    "café/\u0085\u2028\u2029/uv.lock",
+  ]) {
+    const r = { lockfile };
+    const yaml = workflowYaml(r, ["3.14"], ["linux-x86_64"], "9.8.7");
+    const line = yaml.split("\n").filter((s) => s.startsWith("          args: "));
+    assert.equal(line.length, 1);
+    // JSON-quoted scalars are valid YAML; decoding checks the value, not an escaping spelling.
+    const args = JSON.parse(line[0].slice("          args: ".length));
+    assert.equal(args, cliCommand(r, ["3.14"], ["linux-x86_64"]).slice("uvx wheelgap ".length));
+    assert.equal(yaml.split("\n").length, 18, "a path cannot insert another workflow field");
+    assert.doesNotMatch(yaml, /[\r\t\u0085\u2028\u2029]/);
+  }
+});
+
+test("an Actions expression in a lockfile name is passed as literal command text", () => {
+  const r = { lockfile: "${{ secrets.GITHUB_TOKEN }}/a ${{ github.ref }}/uv.lock" };
+  const yaml = workflowYaml(r, ["3.14"], ["linux-x86_64"], "9.8.7");
+  const value = JSON.parse(yaml.match(/^          args: (.*)$/m)[1]);
+  // One Actions string literal: embedded single quotes are doubled, so none of the path is evaluated.
+  const literal = value.match(/^\$\{\{ '((?:[^']|'')*)' \}\}$/s);
+  assert.ok(literal, "the whole value is a single quoted Actions literal");
+  assert.equal(literal[1].replace(/''/g, "'"), cliCommand(r, ["3.14"], ["linux-x86_64"]).slice("uvx wheelgap ".length));
 });
 
 test("the CLI command and fix prompt leave refused environments out", () => {
