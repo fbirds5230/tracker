@@ -649,7 +649,7 @@ test("the badge is a small static image on the page's own origin, offered as Mar
   assert.doesNotMatch(page, /innerHTML/);
 });
 
-test("the workflow panel renders and copies the checked release, and clears stale private or uncovered results", async () => {
+test("the workflow panel renders and copies the checked release, and clears stale unavailable results", async () => {
   const html = read("index.html");
   const section = html.match(/<section id="workflow" aria-labelledby="workflow-title" hidden>(.*?)<\/section>/s);
   assert.ok(section, "the workflow starts hidden");
@@ -717,6 +717,24 @@ test("the workflow panel renders and copies the checked release, and clears stal
   timers.shift()();
   assert.equal(button.textContent, "Copy workflow");
 
+  const unavailable = [];
+  state.result.lockfile = "my app/uv.lock";
+  renderNext();
+  unavailable.push({ reason: "space in path", hidden: $("workflow").hidden, text: $("workflow-yaml").textContent });
+  assert.equal($("cli").textContent, checkLogic.cliCommand(state.result, state.pythons, state.platforms));
+  state.result.lockfile = "uv.lock";
+  worker.onmessage({ data: { type: "ready", wheelgap: null } });
+  renderNext();
+  unavailable.push({ reason: "version not available", hidden: $("workflow").hidden, text: $("workflow-yaml").textContent });
+  assert.deepEqual(unavailable, [
+    { reason: "space in path", hidden: true, text: "" },
+    { reason: "version not available", hidden: true, text: "" },
+  ]);
+  worker.onmessage({ data: { type: "ready", wheelgap: version } });
+  renderNext();
+  assert.equal($("workflow").hidden, false);
+  assert.equal($("workflow-yaml").textContent, yaml);
+
   state.result.private = ["internal-package"];
   renderNext();
   assert.equal($("workflow").hidden, true);
@@ -728,7 +746,7 @@ test("the workflow panel renders and copies the checked release, and clears stal
   assert.equal($("workflow-yaml").textContent, "");
 
   state.result.outside_environments = [];
-  state.result.lockfile = "changed <file>& #name/uv.lock";
+  state.result.lockfile = "changed/path/uv.lock";
   worker.onmessage({ data: { type: "ready", wheelgap: "9.8.7" } });
   renderNext();
   assert.equal($("workflow").hidden, false);

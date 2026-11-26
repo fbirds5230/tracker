@@ -641,33 +641,26 @@ test("no workflow is offered when the CLI has no covered target", () => {
   assert.equal(workflowYaml(result, ["3.14"], [], "9.8.7"), null);
 });
 
-test("workflow arguments keep path punctuation and line breaks in one YAML string", () => {
+test("no workflow is offered for paths the Action cannot pass literally", () => {
   for (const lockfile of [
+    "my app/uv.lock",
     'my app: next #comment/"quotes"/uv.lock',
     "one\n          comment: false\r\tback\\slash/uv.lock",
     "O'Brien/uv.lock",
     "café/\u0085\u2028\u2029/uv.lock",
+    "${{ secrets.GITHUB_TOKEN }}/a ${{ github.ref }}/uv.lock",
+    "",
   ]) {
     const r = { lockfile };
-    const yaml = workflowYaml(r, ["3.14"], ["linux-x86_64"], "9.8.7");
-    const line = yaml.split("\n").filter((s) => s.startsWith("          args: "));
-    assert.equal(line.length, 1);
-    // JSON-quoted scalars are valid YAML; decoding checks the value, not an escaping spelling.
-    const args = JSON.parse(line[0].slice("          args: ".length));
-    assert.equal(args, cliCommand(r, ["3.14"], ["linux-x86_64"]).slice("uvx wheelgap ".length));
-    assert.equal(yaml.split("\n").length, 18, "a path cannot insert another workflow field");
-    assert.doesNotMatch(yaml, /[\r\t\u0085\u2028\u2029]/);
+    assert.equal(workflowYaml(r, ["3.14"], ["linux-x86_64"], "9.8.7"), null, lockfile);
   }
+  assert.equal(cliCommand({ lockfile: "my app/uv.lock" }, ["3.14"], ["linux-x86_64"]), "uvx wheelgap 'my app/uv.lock' -p 3.14 -t linux-x86_64");
 });
 
-test("an Actions expression in a lockfile name is passed as literal command text", () => {
-  const r = { lockfile: "${{ secrets.GITHUB_TOKEN }}/a ${{ github.ref }}/uv.lock" };
-  const yaml = workflowYaml(r, ["3.14"], ["linux-x86_64"], "9.8.7");
-  const value = JSON.parse(yaml.match(/^          args: (.*)$/m)[1]);
-  // One Actions string literal: embedded single quotes are doubled, so none of the path is evaluated.
-  const literal = value.match(/^\$\{\{ '((?:[^']|'')*)' \}\}$/s);
-  assert.ok(literal, "the whole value is a single quoted Actions literal");
-  assert.equal(literal[1].replace(/''/g, "'"), cliCommand(r, ["3.14"], ["linux-x86_64"]).slice("uvx wheelgap ".length));
+test("no workflow is offered before the worker reports a version", () => {
+  for (const version of [null, undefined, "", false, 0]) {
+    assert.equal(workflowYaml(result, ["3.14"], ["linux-x86_64"], version), null);
+  }
 });
 
 test("the CLI command and fix prompt leave refused environments out", () => {

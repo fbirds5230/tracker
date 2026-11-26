@@ -516,15 +516,12 @@ export function cliCommand(result, pythons, platforms) {
   return `uvx wheelgap ${lock} -p ${sortPythons(selected.pythons).join(",")} -t ${selected.platforms.join(",")}`;
 }
 
-// The pull request gate uses the same covered targets and shell quoting as the local command.
+// The Action splits arguments without interpreting shell quotes, so only offer literal paths.
 export function workflowYaml(result, pythons, platforms, version) {
+  if (!version || !/^[A-Za-z0-9._\/-]+$/.test(result.lockfile)) return null;
   const command = cliCommand(result, pythons, platforms);
   if (!command) return null;
-  let args = command.slice("uvx wheelgap ".length);
-  // Actions evaluates expressions even inside YAML quotes. Keep a path containing ${{...}} literal.
-  if (args.includes("${{")) args = "${{ '" + args.replace(/'/g, "''") + "' }}";
-  // JSON strings are YAML strings too; escape YAML's extra line separators so no path can add a field.
-  const quoted = JSON.stringify(args).replace(/[\u0085\u2028\u2029]/g, (c) => "\\u" + c.charCodeAt(0).toString(16).padStart(4, "0"));
+  const quoted = JSON.stringify(command.slice("uvx wheelgap ".length));
   return `name: wheelgap
 on: pull_request
 permissions:
